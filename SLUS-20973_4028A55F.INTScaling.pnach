@@ -1,7 +1,7 @@
 gametitle=Champions: Return to Arms * NTSC-U * SLUS-20973 * 4028A55F
 [INT Scaling]
 author=mysaltyspace (inspired by skeewirt's CoN mod, made by Claude code)
-description=All player spell damage (direct, AoE, DoT, beam) scales with INT. Diminishing returns: 0.5%/pt up to 100, 0.4%/pt up to 200, 0.3%/pt up to 300, 0.2%/pt beyond. All 4 players use their own INT. Physical/melee and weapon enchantment elemental unaffected. VERIFIED WORKING.
+description=All player spell damage (direct, AoE, DoT, beam) scales with INT. Diminishing returns: 0.5%/pt up to 100, 0.4%/pt up to 200, 0.3%/pt up to 300, 0.2%/pt beyond. All 4 players use their own INT. Physical/melee and weapon enchantment elemental unaffected.
 
 // ============================================================
 // SCALING TABLE (spell damage multiplier bonus)
