@@ -1,0 +1,225 @@
+gametitle=Champions: Return to Arms * NTSC-U * SLUS-20973 * 4028A55F
+[INT Scaling]
+author=mysaltyspace (inspired by skeewirt's CoN mod, made by Claude code)
+description=All player spell damage (direct, AoE, DoT, beam) scales with INT. Diminishing returns: 0.5%/pt up to 100, 0.4%/pt up to 200, 0.3%/pt up to 300, 0.2%/pt beyond. All 4 players use their own INT. Physical/melee and weapon enchantment elemental unaffected. VERIFIED WORKING.
+
+// ============================================================
+// SCALING TABLE (spell damage multiplier bonus)
+//   INT  20: +0%    (base threshold, no bonus below)
+//   INT  50: +15%
+//   INT  63: +21.5%
+//   INT 100: +40%
+//   INT 150: +60%
+//   INT 200: +80%
+//   INT 300: +110%
+//   INT 400: +130%
+// ============================================================
+
+// ============================================================
+// HOOK 5 — Universal spell damage (001EA6C4)
+//
+// WHY THIS POINT:
+//   z_un_001e8230 handles all damage. Physical damage (melee/arrows)
+//   takes the bit-5-CLEAR path and exits unconditionally at 001E84B0
+//   before ever reaching 001EA6C4.
+//
+//   All spell damage (bit-5-SET path) converges at 001EA6C4 just
+//   before the final HP-reduction vtable call. At this point:
+//     f23 = final computed spell damage (float)
+//     f20 = 0.5  (loaded at 001EA6B0 for rounding)
+//
+// AUTO-ATTACK / PHYSICAL GUARD:
+//   Staff auto-attacks and weapon attacks (blunt, slashing, ranged)
+//   also reach 001EA6C4 via the spell path. They must NOT be scaled.
+//   Discriminant: flags word at original sp+0x1A4.
+//   Mask 0x40040004 catches all physical types:
+//     Blunt melee:      0x00040001  & 0x40040004 = 0x00040000  -> skip
+//     Slashing:         0x00040008  & 0x40040004 = 0x00040000  -> skip
+//     Ranged:           0x00000004  & 0x40040004 = 0x00000004  -> skip
+//     Cyclone (slash):  0x40080008  & 0x40040004 = 0x40000000  -> skip
+//     Cyclone (blunt):  0x40080001  & 0x40040004 = 0x40000000  -> skip
+//     All spells/Roar:  0x00000000..0x00080940  & 0x40040004 = 0  -> scale
+//   Observed flag values at 001EA6C4:
+//     Bolt of Shock:    0x00000040  -> scale
+//     Shock of Frost:   0x00000000  -> scale
+//     Cone of Fire:     0x00000040  -> scale
+//     Cone of Frost:    0x0080C040  -> scale
+//     Wizard Beam:      0x00000100  -> scale
+//     Roar (AoE):       0x00080940  -> scale
+//   Guard: if (flags & 0x40040004) != 0, branch to restore+return.
+//   After sp-=24 inside detour, flags word is at sp+0x1BC.
+//   Mask loaded via lui/ori into t1, then AND with t0 (flags).
+//
+// PER-PLAYER INT LOOKUP:
+//   s4 is the per-player entity pointer. Static, stride 0x0BB8:
+//     Player 1: s4 = 0x006C88C0  INT at 0x004D8B84
+//     Player 2: s4 = 0x006C9478  INT at 0x004DD7B4
+//     Player 3: s4 = 0x006CA030  INT at 0x004E23E4
+//     Player 4: s4 = 0x006CABE8  INT at 0x004E7014
+//   INT stride = 0x4C30 (not a multiple of s4 stride 0x0BB8).
+//   Formula:
+//     player_index = (s4 - 0x006C88C0) / 0x0BB8   -> {0,1,2,3}
+//     INT_address  = 0x004D8B84 + player_index * 0x4C30
+//   Implemented via divu / mflo / multu / mflo.
+//
+// ORIGINAL:  add.s f00,f23,f20   (4614B800)
+//   Rounds f23 for int conversion, result in f0 for cvt.w.s.
+//
+// AFTER HOOK: f23 scaled by INT bonus first, then displaced add.s
+//   runs in delay slot -> f0 = scaled_f23 + 0.5.
+//   Execution resumes at 001EA6CC (cvt.w.s f01,f00).
+//
+// PREVIOUS HOOKS (all removed):
+//   Hook 1 (001E8D0C): gated by blez s7 — missed Shock of Frost
+//   Hook 2 (001EA890): never triggered (confirmed dead)
+//   Hook 3 (001EA7B8): f23=0.0 at that point (zeroed at 001EA6F8)
+//   Hook 4 (001E8494): physical path — unintentionally scaled melee
+// ============================================================
+
+// ---- HIJACK at 001EA6C4 --------------------------------
+patch=1,EE,201EA6C4,extended,08236600 // j 0x008D9800  (was: add.s f00,f23,f20 = 4614B800)
+// delay slot 001EA6C8 (02A0202D  daddu a0,s5,zero) runs unchanged
+
+// ---- DETOUR at 0x008D9800 ------------------------------
+// Entry state: f23=spell damage, f20=0.5 (must not clobber)
+// f0 free (overwritten by displaced add.s at return)
+// Saves: at, t0, t1, f1, f2, f3 via 24-byte stack frame
+// Reads s4 (per-player entity pointer) without saving — read-only
+
+// Save registers
+patch=1,EE,208D9800,extended,27BDFFE8 // addiu sp,sp,-24
+patch=1,EE,208D9804,extended,AFA10000 // sw at,0(sp)
+patch=1,EE,208D9808,extended,AFA80004 // sw t0,4(sp)
+patch=1,EE,208D980C,extended,AFA90008 // sw t1,8(sp)
+patch=1,EE,208D9810,extended,E7A1000C // swc1 f1,12(sp)
+patch=1,EE,208D9814,extended,E7A20010 // swc1 f2,16(sp)
+patch=1,EE,208D9818,extended,E7A30014 // swc1 f3,20(sp)
+
+// ---- Guard: skip INT scaling for all physical attacks --
+// original sp+0x1A4 = current sp+0x1BC  (sp decremented by 24 = 0x18)
+// mask 0x40040004: bit 30=melee-AoE(Cyclone) bit 18=melee(blunt/slash) bit 2=ranged
+//   Blunt:          0x00040001 & 0x40040004 = 0x00040000 != 0 -> skip
+//   Slashing:       0x00040008 & 0x40040004 = 0x00040000 != 0 -> skip
+//   Ranged:         0x00000004 & 0x40040004 = 0x00000004 != 0 -> skip
+//   Cyclone(slash): 0x40080008 & 0x40040004 = 0x40000000 != 0 -> skip
+//   Cyclone(blunt): 0x40080001 & 0x40040004 = 0x40000000 != 0 -> skip
+//   Spells/Roar:    any        & 0x40040004 = 0            -> scale
+// bne offset: (008D9960 - 008D982C - 4) / 4 = 0x130/4 = 0x4C
+patch=1,EE,208D981C,extended,8FA801BC // lw t0,0x1BC(sp)       load flags word
+patch=1,EE,208D9820,extended,3C094004 // lui t1,0x4004         mask hi: bits 30+18
+patch=1,EE,208D9824,extended,35290004 // ori t1,t1,0x0004      mask lo: bit 2  -> t1=0x40040004
+patch=1,EE,208D9828,extended,01094024 // and t0,t0,t1          t0 = flags & mask
+patch=1,EE,208D982C,extended,1500004C // bne t0,zero,008D9960  if any phys bit set -> skip
+patch=1,EE,208D9830,extended,00000000 // nop
+
+// ---- Per-player INT load ---------------------------------
+// player_index = (s4 - 0x006C88C0) / 0x0BB8   -> {0,1,2,3}
+// INT_address  = 0x004D8B84 + player_index * 0x4C30
+patch=1,EE,208D9834,extended,3C09006C // lui t1,0x006C         P1 s4 base [hi]
+patch=1,EE,208D9838,extended,352988C0 // ori t1,t1,0x88C0      t1 = 0x006C88C0
+patch=1,EE,208D983C,extended,02894023 // subu t0,s4,t1         t0 = s4 - P1_base
+patch=1,EE,208D9840,extended,34090BB8 // ori t1,zero,0x0BB8    t1 = s4 stride (3000)
+patch=1,EE,208D9844,extended,0109001B // divu t0,t1            LO = player_index
+patch=1,EE,208D9848,extended,00004012 // mflo t0               t0 = player_index {0,1,2,3}
+patch=1,EE,208D984C,extended,34094C30 // ori t1,zero,0x4C30    t1 = INT stride
+patch=1,EE,208D9850,extended,01090019 // multu t0,t1           LO = index * INT_stride
+patch=1,EE,208D9854,extended,00004012 // mflo t0               t0 = player_index * 0x4C30
+patch=1,EE,208D9858,extended,3C09004E // lui t1,0x004E         P1 INT base [hi]
+patch=1,EE,208D985C,extended,25298B84 // addiu t1,t1,0x8B84    t1 = 0x004D8B84
+patch=1,EE,208D9860,extended,01094021 // addu t0,t0,t1         t0 = INT address (this player)
+patch=1,EE,208D9864,extended,8D080000 // lw t0,0(t0)           t0 = INT value
+
+// Convert INT to float -> f2
+patch=1,EE,208D9868,extended,44880000 // mtc1 t0,f0
+patch=1,EE,208D986C,extended,46800020 // cvt.s.w f0,f0
+patch=1,EE,208D9870,extended,46000086 // mov.s f2,f0           f2 = float(INT)
+patch=1,EE,208D9874,extended,44800000 // mtc1 zero,f0          f0 = 0.0 (bonus accumulator)
+
+// ---- TIER 1: INT 20-100, +0.5%/pt (max +40%) ----------
+patch=1,EE,208D9878,extended,3C0942C8 // lui t1,0x42C8         100.0f
+patch=1,EE,208D987C,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208D9880,extended,460110E9 // min.s f3,f2,f1        f3 = min(INT,100)
+patch=1,EE,208D9884,extended,3C0941A0 // lui t1,0x41A0         20.0f
+patch=1,EE,208D9888,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208D988C,extended,460118C1 // sub.s f3,f3,f1        f3 = min(INT,100) - 20
+patch=1,EE,208D9890,extended,46030034 // c.lt.s f0,f3
+patch=1,EE,208D9894,extended,45000006 // bc1f +6 -> 008D98B0   skip if INT<=20
+patch=1,EE,208D9898,extended,00000000 // nop
+patch=1,EE,208D989C,extended,3C093BA3 // lui t1,0x3BA3         0.005f hi
+patch=1,EE,208D98A0,extended,3529D70A // ori t1,t1,0xD70A      0.005f lo  (3BA3D70A)
+patch=1,EE,208D98A4,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208D98A8,extended,460118C2 // mul.s f3,f3,f1        pts_in_t1 * 0.005
+patch=1,EE,208D98AC,extended,46030000 // add.s f0,f0,f3        accumulate
+// skip_t1: 008D98B0
+
+// ---- TIER 2: INT 100-200, +0.4%/pt (max +40%) ---------
+patch=1,EE,208D98B0,extended,3C094348 // lui t1,0x4348         200.0f
+patch=1,EE,208D98B4,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208D98B8,extended,460110E9 // min.s f3,f2,f1        f3 = min(INT,200)
+patch=1,EE,208D98BC,extended,3C0942C8 // lui t1,0x42C8         100.0f
+patch=1,EE,208D98C0,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208D98C4,extended,460118C1 // sub.s f3,f3,f1        f3 = min(INT,200) - 100
+patch=1,EE,208D98C8,extended,46030034 // c.lt.s f0,f3
+patch=1,EE,208D98CC,extended,45000006 // bc1f +6 -> 008D98E8   skip if INT<=100
+patch=1,EE,208D98D0,extended,00000000 // nop
+patch=1,EE,208D98D4,extended,3C093B83 // lui t1,0x3B83         0.004f hi
+patch=1,EE,208D98D8,extended,3529126F // ori t1,t1,0x126F      0.004f lo  (3B83126F)
+patch=1,EE,208D98DC,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208D98E0,extended,460118C2 // mul.s f3,f3,f1        pts_in_t2 * 0.004
+patch=1,EE,208D98E4,extended,46030000 // add.s f0,f0,f3        accumulate
+// skip_t2: 008D98E8
+
+// ---- TIER 3: INT 200-300, +0.3%/pt (max +30%) ---------
+patch=1,EE,208D98E8,extended,3C094396 // lui t1,0x4396         300.0f
+patch=1,EE,208D98EC,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208D98F0,extended,460110E9 // min.s f3,f2,f1        f3 = min(INT,300)
+patch=1,EE,208D98F4,extended,3C094348 // lui t1,0x4348         200.0f
+patch=1,EE,208D98F8,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208D98FC,extended,460118C1 // sub.s f3,f3,f1        f3 = min(INT,300) - 200
+patch=1,EE,208D9900,extended,46030034 // c.lt.s f0,f3
+patch=1,EE,208D9904,extended,45000006 // bc1f +6 -> 008D9920   skip if INT<=200
+patch=1,EE,208D9908,extended,00000000 // nop
+patch=1,EE,208D990C,extended,3C093B44 // lui t1,0x3B44         0.003f hi
+patch=1,EE,208D9910,extended,35299BA6 // ori t1,t1,0x9BA6      0.003f lo  (3B449BA6)
+patch=1,EE,208D9914,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208D9918,extended,460118C2 // mul.s f3,f3,f1        pts_in_t3 * 0.003
+patch=1,EE,208D991C,extended,46030000 // add.s f0,f0,f3        accumulate
+// skip_t3: 008D9920
+
+// ---- TIER 4: INT 300+, +0.2%/pt (no cap) --------------
+patch=1,EE,208D9920,extended,460010C6 // mov.s f3,f2           f3 = float(INT)
+patch=1,EE,208D9924,extended,3C094396 // lui t1,0x4396         300.0f
+patch=1,EE,208D9928,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208D992C,extended,460118C1 // sub.s f3,f3,f1        f3 = INT - 300
+patch=1,EE,208D9930,extended,46030034 // c.lt.s f0,f3
+patch=1,EE,208D9934,extended,45000006 // bc1f +6 -> 008D9950   skip if INT<=300
+patch=1,EE,208D9938,extended,00000000 // nop
+patch=1,EE,208D993C,extended,3C093B03 // lui t1,0x3B03         0.002f hi
+patch=1,EE,208D9940,extended,3529126F // ori t1,t1,0x126F      0.002f lo  (3B03126F)
+patch=1,EE,208D9944,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208D9948,extended,460118C2 // mul.s f3,f3,f1        pts_above_300 * 0.002
+patch=1,EE,208D994C,extended,46030000 // add.s f0,f0,f3        accumulate
+// skip_t4: 008D9950
+
+// ---- Apply multiplier to f23 ---------------------------
+patch=1,EE,208D9950,extended,3C093F80 // lui t1,0x3F80         1.0f
+patch=1,EE,208D9954,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208D9958,extended,46000800 // add.s f0,f1,f0        f0 = 1.0 + bonus
+patch=1,EE,208D995C,extended,4600BDC2 // mul.s f23,f23,f0      scale spell damage
+
+// ---- Restore registers ---------------------------------
+// NOTE: guard bne (008D982C) branches here (skip_all = 008D9960)
+//       when physical flag bits detected — f23 returned unmodified
+patch=1,EE,208D9960,extended,8FA10000 // lw at,0(sp)
+patch=1,EE,208D9964,extended,8FA80004 // lw t0,4(sp)
+patch=1,EE,208D9968,extended,8FA90008 // lw t1,8(sp)
+patch=1,EE,208D996C,extended,C7A1000C // lwc1 f1,12(sp)
+patch=1,EE,208D9970,extended,C7A20010 // lwc1 f2,16(sp)
+patch=1,EE,208D9974,extended,C7A30014 // lwc1 f3,20(sp)
+patch=1,EE,208D9978,extended,27BD0018 // addiu sp,sp,24
+
+// ---- Return: displaced instruction runs as delay slot --
+// j 0x001EA6CC; delay slot: add.s f00,f23,f20  (4614B800)
+// -> f0 = (scaled) f23 + 0.5, correctly rounds for cvt.w.s at 001EA6CC
+patch=1,EE,208D997C,extended,0807A9B3 // j 0x001EA6CC
+patch=1,EE,208D9980,extended,4614B800 // add.s f00,f23,f20     (displaced, runs as delay slot)
