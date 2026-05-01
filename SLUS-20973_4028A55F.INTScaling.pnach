@@ -1,7 +1,7 @@
 gametitle=Champions: Return to Arms * NTSC-U * SLUS-20973 * 4028A55F
 [INT Scaling]
 author=mysaltyspace (inspired by skeewirt's CoN mod, made by Claude code)
-description=All player spell damage (direct, AoE, DoT, beam) scales with INT. Diminishing returns: 0.5%/pt up to 100, 0.4%/pt up to 200, 0.3%/pt up to 300, 0.2%/pt beyond. All 4 players use their own INT. Physical/melee and weapon enchantment elemental unaffected.
+description=All spell damage (direct, AoE, DoT, beam) scales with the active character's INT. Diminishing returns: 0.5%/pt up to 100, 0.4%/pt up to 200, 0.3%/pt up to 300, 0.2%/pt beyond. Physical/melee and weapon enchantment elemental unaffected. Single-player verified; multi-player INT addressing unverified.
 
 // ============================================================
 // SCALING TABLE (spell damage multiplier bonus)
@@ -60,17 +60,15 @@ description=All player spell damage (direct, AoE, DoT, beam) scales with INT. Di
 //   After sp-=24 inside detour, flags word is at sp+0x1BC.
 //   Mask loaded via lui/ori into t1, then AND with t0 (flags).
 //
-// PER-PLAYER INT LOOKUP:
-//   s4 is the per-player entity pointer. Static, stride 0x0BB8:
-//     Player 1: s4 = 0x006C88C0  INT at 0x004D8B84
-//     Player 2: s4 = 0x006C9478  INT at 0x004DD7B4
-//     Player 3: s4 = 0x006CA030  INT at 0x004E23E4
-//     Player 4: s4 = 0x006CABE8  INT at 0x004E7014
-//   INT stride = 0x4C30 (not a multiple of s4 stride 0x0BB8).
-//   Formula:
-//     player_index = (s4 - 0x006C88C0) / 0x0BB8   -> {0,1,2,3}
-//     INT_address  = 0x004D8B84 + player_index * 0x4C30
-//   Implemented via divu / mflo / multu / mflo.
+// INT LOOKUP:
+//   In single-player the active character always has INT at 0x004D8B84
+//   regardless of which entity slot s4 points to. Character class
+//   determines entity slot (e.g. Wizard -> 0x006C88C0, Shaman -> 0x006C9478)
+//   but the stat block is a single active-character block.
+//   Multi-player INT addresses are unverified; the per-player stride
+//   formula that was here (0x4C30) was found to be wrong.
+//   s4 entity slot is still used by the entity guard (sltiu < 4) to
+//   reject world entity sources (poison clouds, etc.).
 //
 // ENTITY GUARD:
 //   Persistent world entities (e.g. poison cloud DoT sources) reach
@@ -130,9 +128,10 @@ patch=1,EE,208D9828,extended,01094024 // and t0,t0,t1          t0 = flags & mask
 patch=1,EE,208D982C,extended,15000058 // bne t0,zero,008D9990  if any phys bit set -> 008D9990
 patch=1,EE,208D9830,extended,00000000 // nop
 
-// ---- Per-player INT load ---------------------------------
+// ---- Player entity validation + INT load ----------------
 // player_index = (s4 - 0x006C88C0) / 0x0BB8   -> {0,1,2,3}
-// INT_address  = 0x004D8B84 + player_index * 0x4C30
+// Used only for entity guard (sltiu < 4). INT address is fixed:
+// In single-player the active character always uses 0x004D8B84.
 patch=1,EE,208D9834,extended,3C09006C // lui t1,0x006C         P1 s4 base [hi]
 patch=1,EE,208D9838,extended,352988C0 // ori t1,t1,0x88C0      t1 = 0x006C88C0
 patch=1,EE,208D983C,extended,02894023 // subu t0,s4,t1         t0 = s4 - P1_base
@@ -153,13 +152,13 @@ patch=1,EE,208D984C,extended,2D010004 // sltiu at,t0,4         at=1 if valid pla
 patch=1,EE,208D9850,extended,10200046 // beq at,zero,008D996C  if invalid entity -> restore
 patch=1,EE,208D9854,extended,00000000 // nop
 
-patch=1,EE,208D9858,extended,34094C30 // ori t1,zero,0x4C30    t1 = INT stride
-patch=1,EE,208D985C,extended,01090019 // multu t0,t1           LO = index * INT_stride
-patch=1,EE,208D9860,extended,00004012 // mflo t0               t0 = player_index * 0x4C30
-patch=1,EE,208D9864,extended,3C09004E // lui t1,0x004E         P1 INT base [hi]
-patch=1,EE,208D9868,extended,25298B84 // addiu t1,t1,0x8B84    t1 = 0x004D8B84 (sign-ext ok)
-patch=1,EE,208D986C,extended,01094021 // addu t0,t0,t1         t0 = INT address (this player)
-patch=1,EE,208D9870,extended,8D080000 // lw t0,0(t0)           t0 = INT value
+patch=1,EE,208D9858,extended,3C09004E // lui t1,0x004E         INT address [hi]
+patch=1,EE,208D985C,extended,25298B84 // addiu t1,t1,0x8B84    t1 = 0x004D8B84 (active char INT)
+patch=1,EE,208D9860,extended,8D280000 // lw t0,0(t1)           t0 = INT value
+patch=1,EE,208D9864,extended,00000000 // nop
+patch=1,EE,208D9868,extended,00000000 // nop
+patch=1,EE,208D986C,extended,00000000 // nop
+patch=1,EE,208D9870,extended,00000000 // nop
 
 // Convert INT to float -> f2
 patch=1,EE,208D9874,extended,44880000 // mtc1 t0,f0
