@@ -1,7 +1,7 @@
 gametitle=Champions: Return to Arms * NTSC-U * SLUS-20973 * 4028A55F
 [INT Scaling]
 author=mysaltyspace (inspired by skeewirt's CoN mod, made by Claude code)
-description=All spell damage (direct, AoE, DoT, beam) scales with the active character's INT. Diminishing returns: 0.5%/pt up to 100, 0.4%/pt up to 200, 0.3%/pt up to 300, 0.2%/pt beyond. Physical/melee and weapon enchantment elemental unaffected. Single-player verified; multi-player INT addressing unverified.
+description=All spell damage (direct, AoE, DoT, beam) scales with the caster's INT. Diminishing returns: 0.5%/pt up to 100, 0.4%/pt up to 200, 0.3%/pt up to 300, 0.2%/pt beyond. 1-4 players each use their own INT. Physical/melee and weapon enchantment elemental unaffected.
 
 // ============================================================
 // SCALING TABLE (spell damage multiplier bonus)
@@ -61,13 +61,17 @@ description=All spell damage (direct, AoE, DoT, beam) scales with the active cha
 //   Mask loaded via lui/ori into t1, then AND with t0 (flags).
 //
 // INT LOOKUP:
-//   In single-player the active character always has INT at 0x004D8B84
-//   regardless of which entity slot s4 points to. Character class
-//   determines entity slot (e.g. Wizard -> 0x006C88C0, Shaman -> 0x006C9478)
-//   but the stat block is a single active-character block.
-//   Multi-player INT addresses are unverified; the per-player stride
-//   formula that was here (0x4C30) was found to be wrong.
-//   s4 entity slot is still used by the entity guard (sltiu < 4) to
+//   player_index computed from s4 entity slot drives a stride formula
+//   (stride 0x4C30) to find each player's INT address. Verified:
+//     index 0 (entity 0x006C88C0): INT at 0x004D8B84
+//     index 1 (entity 0x006C9478): INT at 0x004DD7B4
+//     index 2 (entity 0x006CA030): INT at 0x004E23E4
+//     index 3 (entity 0x006CABE8): INT at 0x004E7014
+//   Single-player quirk: character class fixes entity slot (e.g. Shaman
+//   always uses slot 2), but stat blocks 1-3 are zero in single-player.
+//   Zero-check fallback at 008D9A24 handles this: if lw returns 0, fall
+//   back to slot 0 (0x004D8B84) which always holds the active character's INT.
+//   s4 entity slot is also used by the entity guard (sltiu < 4) to
 //   reject world entity sources (poison clouds, etc.).
 //
 // ENTITY GUARD:
@@ -130,8 +134,17 @@ patch=1,EE,208D9830,extended,00000000 // nop
 
 // ---- Player entity validation + INT load ----------------
 // player_index = (s4 - 0x006C88C0) / 0x0BB8   -> {0,1,2,3}
-// Used only for entity guard (sltiu < 4). INT address is fixed:
-// In single-player the active character always uses 0x004D8B84.
+// Used by entity guard (sltiu < 4) AND by stride formula below.
+// Verified INT addresses (stride 0x4C30):
+//   index 0 (entity 0x006C88C0): INT at 0x004D8B84
+//   index 1 (entity 0x006C9478): INT at 0x004DD7B4
+//   index 2 (entity 0x006CA030): INT at 0x004E23E4
+//   index 3 (entity 0x006CABE8): INT at 0x004E7014
+// Single-player quirk: character class sets entity slot (e.g. Shaman
+//   always loads into entity slot 2 even in a solo session), but stat
+//   blocks 1-3 are zero in single-player. Zero-check fallback at
+//   008D9A24 catches this and reads from block 0 (0x004D8B84) instead.
+// Extended INT logic at 008D9A24; j at 208D9858 trampolines there.
 patch=1,EE,208D9834,extended,3C09006C // lui t1,0x006C         P1 s4 base [hi]
 patch=1,EE,208D9838,extended,352988C0 // ori t1,t1,0x88C0      t1 = 0x006C88C0
 patch=1,EE,208D983C,extended,02894023 // subu t0,s4,t1         t0 = s4 - P1_base
@@ -152,13 +165,13 @@ patch=1,EE,208D984C,extended,2D010004 // sltiu at,t0,4         at=1 if valid pla
 patch=1,EE,208D9850,extended,10200046 // beq at,zero,008D996C  if invalid entity -> restore
 patch=1,EE,208D9854,extended,00000000 // nop
 
-patch=1,EE,208D9858,extended,3C09004E // lui t1,0x004E         INT address [hi]
-patch=1,EE,208D985C,extended,25298B84 // addiu t1,t1,0x8B84    t1 = 0x004D8B84 (active char INT)
-patch=1,EE,208D9860,extended,8D280000 // lw t0,0(t1)           t0 = INT value
-patch=1,EE,208D9864,extended,00000000 // nop
-patch=1,EE,208D9868,extended,00000000 // nop
-patch=1,EE,208D986C,extended,00000000 // nop
-patch=1,EE,208D9870,extended,00000000 // nop
+patch=1,EE,208D9858,extended,08236689 // j 008D9A24             -> extended INT lookup
+patch=1,EE,208D985C,extended,00000000 // nop
+patch=1,EE,208D9860,extended,00000000 // nop (dead)
+patch=1,EE,208D9864,extended,00000000 // nop (dead)
+patch=1,EE,208D9868,extended,00000000 // nop (dead)
+patch=1,EE,208D986C,extended,00000000 // nop (dead)
+patch=1,EE,208D9870,extended,00000000 // nop (dead)
 
 // Convert INT to float -> f2
 patch=1,EE,208D9874,extended,44880000 // mtc1 t0,f0
@@ -258,10 +271,75 @@ patch=1,EE,208D9988,extended,0807A9B3 // j 0x001EA6CC
 patch=1,EE,208D998C,extended,4614B800 // add.s f00,f23,f20     (displaced, runs as delay slot)
 
 // ---- Passthrough at 008D9990 (overwritten when Shield Bash section enabled) --
-// When only INT Scaling is checked, physical attacks branch here and
-// jump straight to restore, bypassing Shield Bash code entirely.
-patch=1,EE,208D9990,extended,0823665B // j 008D996C            passthrough -> restore
+// When only INT Scaling is checked, attacks with bit 19/21/18/30/2 land here.
+// We can't restore blindly — Roar (bit 19+6+11+8) and Holy Strike (bit 19 only)
+// must still INT scale. Jump to dispatch at 008D9B00 to sort them out.
+patch=1,EE,208D9990,extended,082366C0 // j 008D9B00            -> Holy Strike / physical dispatch
 patch=1,EE,208D9994,extended,00000000 // nop
+
+// ============================================================
+// EXTENDED INT LOOKUP at 008D9A24
+//
+// Entered via j from 208D9858 with t0 = player_index (0-3).
+// Computes INT address via stride formula; if the stat block is
+// zero (single-player char in entity slot 2-4), falls back to
+// slot 0 (0x004D8B84) which always holds the active character's INT.
+//
+// bne offset: (008D9874 - 008D9A44) / 4 = -0x1D0/4 = -0x74 = 0xFF8C
+// j return:   008D9874 = 0x0823661D
+// ============================================================
+patch=1,EE,208D9A24,extended,34094C30 // ori t1,zero,0x4C30    INT stride
+patch=1,EE,208D9A28,extended,01090019 // multu t0,t1           index * stride
+patch=1,EE,208D9A2C,extended,00004012 // mflo t0               byte offset
+patch=1,EE,208D9A30,extended,3C09004E // lui t1,0x004E         P1 INT base [hi]
+patch=1,EE,208D9A34,extended,25298B84 // addiu t1,t1,0x8B84    t1 = 0x004D8B84
+patch=1,EE,208D9A38,extended,01094021 // addu t0,t0,t1         t0 = INT address
+patch=1,EE,208D9A3C,extended,8D080000 // lw t0,0(t0)           t0 = INT value
+patch=1,EE,208D9A40,extended,1500FF8C // bne t0,zero,008D9874  non-zero: use it
+patch=1,EE,208D9A44,extended,3C09004E // [delay slot] lui t1,0x004E  (runs always)
+// fallback: stat block was empty (single-player, non-slot-0 entity)
+patch=1,EE,208D9A48,extended,25298B84 // addiu t1,t1,0x8B84    t1 = 0x004D8B84
+patch=1,EE,208D9A4C,extended,8D280000 // lw t0,0(t1)           t0 = slot-0 INT
+patch=1,EE,208D9A50,extended,0823661D // j 008D9874
+patch=1,EE,208D9A54,extended,00000000 // nop
+
+// ============================================================
+// HOLY STRIKE / PHYSICAL DISPATCH at 008D9B00
+//
+// Reached from:
+//   - Passthrough at 008D9990 (INT Scaling only, no Shield Bash)
+//   - beq at 208D9998 in Shield Bash section (bit 6 not set)
+//
+// t0 may be stale (masked flags from outer guard AND). Reloads fresh.
+//
+// Dispatch:
+//   bit 6 set + bits 11+8 set  -> Roar       -> INT scaling (008D9874)
+//   bit 6 set + bits 11+8 clr  -> SB Lv6-16  -> restore (no armor scaling in INT-only mode)
+//   bit 6 clr + bits 30/18/2   -> physical   -> restore
+//   bit 6 clr + no 30/18/2     -> Holy Strike -> INT scaling (008D9874)
+//
+// bne Roar offset:  (008D9834 - (008D9B10+4)) / 4 = -0x2E0/4 = -0xB8 = 0xFF48
+// bne phys offset:  (008D9B40 - (008D9B30+4)) / 4 = +0x0C/4  = +3    = 0x0003
+// ============================================================
+patch=1,EE,208D9B00,extended,8FA801BC // lw t0,0x1BC(sp)           reload flags
+patch=1,EE,208D9B04,extended,31090040 // andi t1,t0,0x0040          t1 = bit 6
+patch=1,EE,208D9B08,extended,11200006 // beq t1,zero,008D9B24       no bit 6 -> physical/HS check
+patch=1,EE,208D9B0C,extended,31090900 // [delay slot] andi t1,t0,0x0900  t1 = bits 11+8
+// bit 6 set: Roar or SB Lv6-16
+patch=1,EE,208D9B10,extended,1520FF48 // bne t1,zero,008D9834       Roar -> INT scaling (load INT first)
+patch=1,EE,208D9B14,extended,00000000 // nop
+patch=1,EE,208D9B18,extended,0823665B // j 008D996C                 SB Lv6-16 -> restore
+patch=1,EE,208D9B1C,extended,00000000 // nop (delay slot)
+// no bit 6: check physical bits (30+18+2) in original flags
+patch=1,EE,208D9B24,extended,3C094004 // lui t1,0x4004              bits 30+18 hi
+patch=1,EE,208D9B28,extended,35290004 // ori t1,t1,0x0004           t1 = 0x40040004 (bits 30+18+2)
+patch=1,EE,208D9B2C,extended,01094024 // and t0,t0,t1               t0 = flags & physical_mask
+patch=1,EE,208D9B30,extended,15000003 // bne t0,zero,008D9B40       physical bits set -> restore
+patch=1,EE,208D9B34,extended,00000000 // nop
+patch=1,EE,208D9B38,extended,0823660D // j 008D9834                 Holy Strike -> INT scaling (load INT first)
+patch=1,EE,208D9B3C,extended,00000000 // nop (delay slot)
+patch=1,EE,208D9B40,extended,0823665B // j 008D996C                 physical -> restore
+patch=1,EE,208D9B44,extended,00000000 // nop (delay slot)
 
 [Shield Bash Defense Scaling]
 author=mysaltyspace (made by Claude code)
@@ -324,11 +402,11 @@ description=Shield Bash damage scales with total armor. Formula: damage = (base+
 //   Bit 6 + bits 11+8     -> Roar (spell caught by outer guard) -> INT scaling (008D9834)
 //   Bit 6 + no bits 11+8  -> Shield Bash (any level)  -> armor scaling
 //
-// beq offset: (008D996C - 008D999C - 4) / 4 = -0x30/4 = -12 = 0xFFF4
-// bne offset: (008D9834 - 008D99A4 - 4) / 4 = -0x170/4 = -92 = 0xFFA4
+// beq offset: (008D9B00 - (008D9998+4)) / 4 = +0x164/4 = +89 = 0x0059
+// bne offset: (008D9834 - (008D99A0+4)) / 4 = -0x170/4 = -92 = 0xFFA4
 patch=1,EE,208D9990,extended,8FA801BC // lw t0,0x1BC(sp)         reload flags word
 patch=1,EE,208D9994,extended,31090040 // andi t1,t0,0x0040        t1 = flags & bit6
-patch=1,EE,208D9998,extended,1120FFF4 // beq t1,zero,008D996C     no bit6 -> physical -> restore
+patch=1,EE,208D9998,extended,11200059 // beq t1,zero,008D9B00     no bit6 -> Holy Strike dispatch
 patch=1,EE,208D999C,extended,31090900 // [delay slot] andi t1,t0,0x0900  t1 = flags & (bit11+8)
 patch=1,EE,208D99A0,extended,1520FFA4 // bne t1,zero,008D9834     Roar bits set -> INT scaling
 patch=1,EE,208D99A4,extended,00000000 // nop (delay slot, fall through -> Shield Bash)
