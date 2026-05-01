@@ -11,7 +11,7 @@ PCSX2 `.pnach` patch mods for **Champions: Return to Arms** (PS2, NTSC-U).
 ### INT Scaling
 `custom patches/SLUS-20973_4028A55F.INTScaling.pnach`
 
-Makes spell damage scale with the active character's **Intelligence (INT)** stat using diminishing returns. Verified working in single-player. Multi-player INT address mapping is unverified.
+Makes spell damage scale with the caster's **Intelligence (INT)** stat using diminishing returns. Works in 1–4 player sessions — each player's spells scale off their own INT.
 
 #### Scaling table
 
@@ -33,6 +33,7 @@ Tiers: **+0.5%/pt** from 20–100 · **+0.4%/pt** from 100–200 · **+0.3%/pt**
 - DoT ticks (Fire Storm, etc.)
 - Beam spells (Wizard Beam, etc.)
 - Berserker force/shout abilities (Roar, etc.)
+- Holy Strike (Cleric)
 
 #### What does NOT scale
 - Melee attacks (blunt, slashing)
