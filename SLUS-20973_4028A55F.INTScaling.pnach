@@ -38,7 +38,7 @@ description=All player spell damage (direct, AoE, DoT, beam) scales with INT. Di
 //     Ranged:           0x00000004  & 0x40040004 = 0x00000004  -> skip
 //     Cyclone (slash):  0x40080008  & 0x40040004 = 0x40000000  -> skip
 //     Cyclone (blunt):  0x40080001  & 0x40040004 = 0x40000000  -> skip
-//     All spells/Roar:  0x00000000..0x00080940  & 0x40040004 = 0  -> scale
+//     All spells/Roar:  0x00000000..0x00080940  & 0x40240004 = 0  -> scale
 //   Observed flag values at 001EA6C4:
 //     Bolt of Shock:    0x00000040  -> scale
 //     Shock of Frost:   0x00000000  -> scale
@@ -46,8 +46,17 @@ description=All player spell damage (direct, AoE, DoT, beam) scales with INT. Di
 //     Cone of Frost:    0x0080C040  -> scale
 //     Wizard Beam:      0x00000100  -> scale
 //     Roar (AoE):       0x00080940  -> scale
-//     Shield Bash:      0x00040040  -> skip (bit 18)
-//   Guard: if (flags & 0x40040004) != 0, branch to restore+return.
+//     Shield Bash Lv1-5:  0x00040040  -> skip (bit 18+6)
+//     Shield Bash Lv6-16: 0x00080040  -> skip (bit 19+6, gains multi-target)
+//     Shield Bash Lv17+:  0x00200040  -> skip (bit 21+6, gains push-back)
+//   Guard: if (flags & 0x402C0004) != 0, branch to 008D9990.
+//   NOTE: Roar (0x00080940) has bit 19 and is caught by this guard. At 008D9990
+//   it is identified by bits 11+8 (0x0900) which no SB variant has, then
+//   redirected to INT scaling (008D9834) so it is not incorrectly suppressed.
+//   If Shield Bash Defense Scaling is enabled, 008D9990 contains
+//   Shield Bash detection + armor scaling, then falls through to
+//   restore. If only INT Scaling is enabled, 008D9990 is a
+//   passthrough j directly to restore (008D996C).
 //   After sp-=24 inside detour, flags word is at sp+0x1BC.
 //   Mask loaded via lui/ori into t1, then AND with t0 (flags).
 //
@@ -112,13 +121,13 @@ patch=1,EE,208D9818,extended,E7A30014 // swc1 f3,20(sp)
 //   Cyclone(slash): 0x40080008 & 0x40040004 = 0x40000000 != 0 -> skip
 //   Cyclone(blunt): 0x40080001 & 0x40040004 = 0x40000000 != 0 -> skip
 //   Spells/Roar:    any        & 0x40040004 = 0            -> scale
-// bne target: 008D996C (restore section)
-// bne offset: (008D996C - 008D982C - 4) / 4 = 0x13C/4 = 0x4F
+// bne target: 008D9990 (Shield Bash passthrough / Shield Bash scaling entry)
+// bne offset: (008D9990 - 008D982C - 4) / 4 = 0x160/4 = 0x58
 patch=1,EE,208D981C,extended,8FA801BC // lw t0,0x1BC(sp)       load flags word
-patch=1,EE,208D9820,extended,3C094004 // lui t1,0x4004         mask hi: bits 30+18
-patch=1,EE,208D9824,extended,35290004 // ori t1,t1,0x0004      mask lo: bit 2  -> t1=0x40040004
+patch=1,EE,208D9820,extended,3C09402C // lui t1,0x402C         mask hi: bits 30+21+19+18
+patch=1,EE,208D9824,extended,35290004 // ori t1,t1,0x0004      mask lo: bit 2  -> t1=0x402C0004
 patch=1,EE,208D9828,extended,01094024 // and t0,t0,t1          t0 = flags & mask
-patch=1,EE,208D982C,extended,1500004F // bne t0,zero,008D996C  if any phys bit set -> skip
+patch=1,EE,208D982C,extended,15000058 // bne t0,zero,008D9990  if any phys bit set -> 008D9990
 patch=1,EE,208D9830,extended,00000000 // nop
 
 // ---- Per-player INT load ---------------------------------
@@ -136,10 +145,12 @@ patch=1,EE,208D9848,extended,00004012 // mflo t0               t0 = player_index
 // entity address, not a player -> player_index is garbage -> random
 // INT read -> millions of damage.
 // sltiu: at=1 if t0 < 4 (valid index), at=0 otherwise.
-// beq: if at==0 (invalid), branch to restore without scaling.
+// beq: if at==0 (invalid), branch directly to restore (008D996C).
+// Direct restore avoids a potential loop when a world entity has Roar-like flags
+// (bit 19+6+11+8) and the inner check would redirect back to INT scaling.
 // beq offset: (008D996C - 008D9850 - 4) / 4 = 0x118/4 = 0x46
 patch=1,EE,208D984C,extended,2D010004 // sltiu at,t0,4         at=1 if valid player index
-patch=1,EE,208D9850,extended,10200046 // beq at,zero,008D996C  if invalid entity -> skip
+patch=1,EE,208D9850,extended,10200046 // beq at,zero,008D996C  if invalid entity -> restore
 patch=1,EE,208D9854,extended,00000000 // nop
 
 patch=1,EE,208D9858,extended,34094C30 // ori t1,zero,0x4C30    t1 = INT stride
@@ -230,8 +241,9 @@ patch=1,EE,208D9968,extended,4600BDC2 // mul.s f23,f23,f0      scale spell damag
 
 // ---- Restore registers ---------------------------------
 // NOTE: guard bne (008D982C) and entity guard beq (008D9850) both
-//       branch here when an attack should not be scaled.
-//       f23 is returned unmodified in those cases.
+//       branch to 008D9990. If Shield Bash section is disabled that
+//       is a passthrough j here. If enabled, Shield Bash scaling runs
+//       first, then falls through here.
 patch=1,EE,208D996C,extended,8FA10000 // lw at,0(sp)
 patch=1,EE,208D9970,extended,8FA80004 // lw t0,4(sp)
 patch=1,EE,208D9974,extended,8FA90008 // lw t1,8(sp)
@@ -245,3 +257,123 @@ patch=1,EE,208D9984,extended,27BD0018 // addiu sp,sp,24
 // -> f0 = (scaled) f23 + 0.5, correctly rounds for cvt.w.s at 001EA6CC
 patch=1,EE,208D9988,extended,0807A9B3 // j 0x001EA6CC
 patch=1,EE,208D998C,extended,4614B800 // add.s f00,f23,f20     (displaced, runs as delay slot)
+
+// ---- Passthrough at 008D9990 (overwritten when Shield Bash section enabled) --
+// When only INT Scaling is checked, physical attacks branch here and
+// jump straight to restore, bypassing Shield Bash code entirely.
+patch=1,EE,208D9990,extended,0823665B // j 008D996C            passthrough -> restore
+patch=1,EE,208D9994,extended,00000000 // nop
+
+[Shield Bash Defense Scaling]
+author=mysaltyspace (made by Claude code)
+description=Shield Bash damage scales with total armor. Formula: damage = (base+10+0.04*armor) * (1.7+0.0015*armor). Flat +10 and x1.7 base give early-game bump; armor terms reward defense builds. Requires INT Scaling checkbox to also be enabled.
+
+// ============================================================
+// SHIELD BASH DEFENSE SCALING at 008D9990
+//
+// The INT Scaling guard and entity guard branch to 008D9990 for all
+// physical attacks. This section overwrites the INT Scaling passthrough
+// with real Shield Bash detection and armor scaling.
+//
+// DETECTION:
+//   Shield Bash flags confirmed: 0x00200040 (bit 21 + bit 6)
+//   Bit 21 (0x00200000) is unique to Shield Bash among all observed attacks.
+//   Other physical attacks (blunt/slash/ranged/Cyclone) have bits 18/30/2 but NOT bit 21.
+//   Spells have bit 6 but NOT bit 21.
+//   Outer guard updated to 0x40240004 (added bit 21) to route SB to this section.
+//   Inner check: if (flags & 0x00200000) == 0 -> not Shield Bash -> restore
+//
+// ARMOR SOURCE:
+//   Total armor stored as halfword at entity_base+0xE4 (= s4+0xE4).
+//   s4 is already the per-player entity base (validated by INT Scaling
+//   entity guard before reaching here).
+//   Player 1: 0x006C89A4
+//
+// FORMULA:
+//   damage = (base + 10 + 0.04*armor) * (1.7 + 0.0015*armor)
+//   Left  = f1 = base + 10 + 0.04*armor
+//   Right = f2 = 1.7 + 0.0015*armor
+//   f23   = f1 * f2
+//   Constants:
+//     0.04f   = 0x3D23D70A  (same mantissa as game's 0.01f, exponent +2)
+//     10.0f   = 0x41200000
+//     0.0015f = 0x3AC49BA6
+//     1.7f    = 0x3FD9999A
+//
+// SCALING TABLE (SB Lv20 base ~125, total armor):
+//   armor    0: damage =  230  (135 x 1.70)
+//   armor  200: damage =  286  (143 x 2.00)
+//   armor  400: damage =  347  (151 x 2.30)
+//   armor  524: damage =  388  (156 x 2.49)  <- typical endgame
+//   armor  800: damage =  484  (167 x 2.90)
+//   armor 1000: damage =  560  (175 x 3.20)
+//   armor 2000: damage = 1011  (215 x 4.70)
+//   armor 3000: damage = 1581  (255 x 6.20)
+//
+// REGISTER USE:
+//   f0 = (float)armor  (scratch, safe: overwritten by displaced add.s at return)
+//   f1 = left side temp  (saved/restored by INT Scaling prologue)
+//   f2 = right side temp (saved/restored by INT Scaling prologue)
+//   f3 = 1.7f constant   (saved/restored by INT Scaling prologue)
+//   t0, t1, at = saved/restored by INT Scaling prologue
+// ============================================================
+
+// ---- Shield Bash detection -----------------------------
+// Reload flags (sp was decremented by 0x18 in INT Scaling prologue)
+// 3-way check using delay slot trick:
+//   No bit 6 (0x40)       -> regular physical attack -> restore
+//   Bit 6 + bits 11+8     -> Roar (spell caught by outer guard) -> INT scaling (008D9834)
+//   Bit 6 + no bits 11+8  -> Shield Bash (any level)  -> armor scaling
+//
+// beq offset: (008D996C - 008D999C - 4) / 4 = -0x30/4 = -12 = 0xFFF4
+// bne offset: (008D9834 - 008D99A4 - 4) / 4 = -0x170/4 = -92 = 0xFFA4
+patch=1,EE,208D9990,extended,8FA801BC // lw t0,0x1BC(sp)         reload flags word
+patch=1,EE,208D9994,extended,31090040 // andi t1,t0,0x0040        t1 = flags & bit6
+patch=1,EE,208D9998,extended,1120FFF4 // beq t1,zero,008D996C     no bit6 -> physical -> restore
+patch=1,EE,208D999C,extended,31090900 // [delay slot] andi t1,t0,0x0900  t1 = flags & (bit11+8)
+patch=1,EE,208D99A0,extended,1520FFA4 // bne t1,zero,008D9834     Roar bits set -> INT scaling
+patch=1,EE,208D99A4,extended,00000000 // nop (delay slot, fall through -> Shield Bash)
+
+// ---- Re-check entity is a valid player (safety) --------
+// beq offset: (008D996C - 008D99C4 - 4) / 4 = -0x5C/4 = -23 = 0xFFE9
+patch=1,EE,208D99A8,extended,3C09006C // lui t1,0x006C
+patch=1,EE,208D99AC,extended,352988C0 // ori t1,t1,0x88C0      t1 = 0x006C88C0
+patch=1,EE,208D99B0,extended,02894023 // subu t0,s4,t1         t0 = s4 - P1_base
+patch=1,EE,208D99B4,extended,34090BB8 // ori t1,zero,0x0BB8    t1 = stride
+patch=1,EE,208D99B8,extended,0109001B // divu t0,t1
+patch=1,EE,208D99BC,extended,00004012 // mflo t0               player_index
+patch=1,EE,208D99C0,extended,2D010004 // sltiu at,t0,4         at=1 if valid
+patch=1,EE,208D99C4,extended,1020FFE9 // beq at,zero,008D996C  if invalid -> restore
+patch=1,EE,208D99C8,extended,00000000 // nop
+
+// ---- Load total armor and convert to float -------------
+patch=1,EE,208D99CC,extended,968800E4 // lhu t0,0xE4(s4)       total armor (halfword unsigned)
+patch=1,EE,208D99D0,extended,44880000 // mtc1 t0,f0
+patch=1,EE,208D99D4,extended,46800020 // cvt.s.w f0,f0         f0 = (float)armor
+
+// ---- Left side: f1 = base + 10 + 0.04*armor -----------
+patch=1,EE,208D99D8,extended,3C083D23 // lui t0,0x3D23         0.04f hi
+patch=1,EE,208D99DC,extended,3508D70A // ori t0,t0,0xD70A      0.04f lo  (3D23D70A)
+patch=1,EE,208D99E0,extended,44880800 // mtc1 t0,f1            f1 = 0.04f
+patch=1,EE,208D99E4,extended,46010042 // mul.s f1,f0,f1        f1 = armor * 0.04
+patch=1,EE,208D99E8,extended,4601B840 // add.s f1,f23,f1       f1 = base + armor*0.04
+patch=1,EE,208D99EC,extended,3C084120 // lui t0,0x4120         10.0f (= 0x41200000, no ori needed)
+patch=1,EE,208D99F0,extended,44881000 // mtc1 t0,f2            f2 = 10.0f
+patch=1,EE,208D99F4,extended,46020840 // add.s f1,f1,f2        f1 = base + 10 + 0.04*armor
+
+// ---- Right side: f2 = 1.7 + 0.0015*armor --------------
+patch=1,EE,208D99F8,extended,3C083AC4 // lui t0,0x3AC4         0.0015f hi
+patch=1,EE,208D99FC,extended,35089BA6 // ori t0,t0,0x9BA6      0.0015f lo  (3AC49BA6)
+patch=1,EE,208D9A00,extended,44881000 // mtc1 t0,f2            f2 = 0.0015f
+patch=1,EE,208D9A04,extended,46020082 // mul.s f2,f0,f2        f2 = armor * 0.0015
+patch=1,EE,208D9A08,extended,3C083FD9 // lui t0,0x3FD9         1.7f hi
+patch=1,EE,208D9A0C,extended,3508999A // ori t0,t0,0x999A      1.7f lo  (3FD9999A)
+patch=1,EE,208D9A10,extended,44881800 // mtc1 t0,f3            f3 = 1.7f
+patch=1,EE,208D9A14,extended,46031080 // add.s f2,f2,f3        f2 = 1.7 + 0.0015*armor
+
+// ---- Final multiply ------------------------------------
+patch=1,EE,208D9A18,extended,46020DC2 // mul.s f23,f1,f2       f23 = left * right
+
+// ---- Jump to restore -----------------------------------
+patch=1,EE,208D9A1C,extended,0823665B // j 008D996C            -> restore registers + return
+patch=1,EE,208D9A20,extended,00000000 // nop
