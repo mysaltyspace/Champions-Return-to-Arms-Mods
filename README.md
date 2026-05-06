@@ -40,9 +40,45 @@ Tiers: **+0.5%/pt** from 20–100 · **+0.4%/pt** from 100–200 · **+0.3%/pt**
 - Ranged attacks (bows, thrown weapons)
 - Cyclone and other melee AoE skills
 - Shield Bash — has its own optional scaling mod (see below)
-- Weapon enchantment elemental damage (Fire Weapons, Cold Weapons, Lightning Weapons spells) — these are merged with the weapon's physical hit before the scaling point and cannot currently be distinguished
+- Weapon enchantment elemental damage — has its own separate mod (see below)
+- Socketed gem elemental damage (unaffected by design)
+- Disease/Poison Weapons elemental damage (base game bug — deals no elemental damage)
 
 > **Note:** This patch is a work in progress. If you find a damage type that is incorrectly scaled or not scaled, please open an issue.
+
+---
+
+### Weapon Enchant INT Scaling
+`custom patches/SLUS-20973_4028A55F.WeaponEnchantINTScaling.pnach`
+
+Makes the elemental damage bonus from **Fire Weapons**, **Cold Weapons**, and **Lightning Weapons** spells scale with **Intelligence (INT)**. Uses the same tiered diminishing-returns formula as the INT Scaling mod. Works independently — enable with or without INT Scaling.
+
+#### What scales
+- Fire Weapons elemental hit bonus
+- Cold Weapons elemental hit bonus
+- Lightning Weapons elemental hit bonus
+
+#### What does NOT scale
+- Socketed gem elemental damage (intentionally excluded — different damage source)
+- Disease/Poison Weapons (base game bug — no elemental component to scale)
+- Base weapon physical damage
+
+#### How it works
+Three hook points intercept the game's elemental-merge instruction for each enchant type. At each hook, a small scanner reads the weapon's enchant slot array (up to 4 slots per weapon) and checks the type code stored in each slot. If a Fire/Cold/Lightning Weapons spell buff is found in any slot, INT scaling is applied; if only socket gems are present the damage passes through unchanged. This handles any weapon in your inventory regardless of how many enchants are active or which slot the buff occupies. Each hook then reads P1's INT and applies the same four-tier bonus before merging the scaled value into the total damage.
+
+#### Scaling table (same as INT Scaling)
+
+| INT | Bonus |
+|-----|-------|
+| 20  | +0% (base threshold) |
+| 50  | +15% |
+| 100 | +40% |
+| 150 | +60% |
+| 200 | +80% |
+| 300 | +110% |
+| 400 | +130% |
+
+> **Note:** Currently reads Player 1's INT only. Multiplayer support (each player's own INT) is a stretch goal.
 
 ---
 
@@ -76,15 +112,24 @@ The flat `+10` and `×1.7` base give a small early-game bump even with no armor 
 
 ## Installation
 
-1. Copy the `.pnach` file to your PCSX2 **`patches/`** folder
+1. Copy the desired `.pnach` file(s) to your PCSX2 **`patches/`** folder
    - Default location: `Documents/PCSX2/patches/`
-   - Do **not** put it in the `cheats/` folder
+   - Do **not** put them in the `cheats/` folder
 2. In PCSX2, enable patches: **System → Enable Patches**
-3. Boot the game — the patch is active immediately on load
+3. Boot the game — patches are active immediately on load
 
-The `.pnach` file contains two independently toggleable sections shown as checkboxes in PCSX2:
+### Patch files
+
+| File | Contents |
+|------|----------|
+| `SLUS-20973_4028A55F.INTScaling.pnach` | INT Scaling + Shield Bash Defense Scaling (two checkboxes) |
+| `SLUS-20973_4028A55F.WeaponEnchantINTScaling.pnach` | Weapon Enchant INT Scaling (one checkbox) |
+
+`INTScaling.pnach` has two independently toggleable sections:
 - **INT Scaling** — spell damage scales with INT (standalone)
 - **Shield Bash Defense Scaling** — Shield Bash scales with armor (requires INT Scaling also enabled)
+
+All three mods are fully independent and can be mixed freely.
 
 ---
 
