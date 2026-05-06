@@ -28,18 +28,11 @@ Makes spell damage scale with the caster's **Intelligence (INT)** stat using dim
 Tiers: **+0.5%/pt** from 20–100 · **+0.4%/pt** from 100–200 · **+0.3%/pt** from 200–300 · **+0.2%/pt** above 300
 
 #### What scales
-- All direct damage spells (Bolt of Shock, etc.)
-- AoE spells (Cone of Fire, Cone of Frost, etc.)
-- DoT ticks (Fire Storm, etc.)
-- Beam spells (Wizard Beam, etc.)
-- Berserker force/shout abilities (Roar, etc.)
-- Holy Strike (Cleric)
+- Skills that directly deal damage or DoT such as Bolt of Shock, Cone of Fire, Cone of Frost, Fire Storm, Wizard Beam, Tagar's Insects, Roar (Berserker), Holy Strike (Cleric), etc.
 
 #### What does NOT scale
-- Melee attacks (blunt, slashing)
-- Ranged attacks (bows, thrown weapons)
-- Cyclone and other melee AoE skills
-- Shield Bash — has its own optional scaling mod (see below)
+- Basic attacks (blunt, slashing, bows, thrown)
+- Shield Bash — has its own optional armor scaling mod (see below)
 - Weapon enchantment elemental damage — has its own separate mod (see below)
 - Socketed gem elemental damage (unaffected by design)
 - Disease/Poison Weapons elemental damage (base game bug — deals no elemental damage)
