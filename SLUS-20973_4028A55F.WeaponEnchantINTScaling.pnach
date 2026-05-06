@@ -16,10 +16,16 @@ description=Elemental damage from Fire/Cold/Lightning Weapons spells scales with
 // displaced add.s, and (5) calls the original JAL target / replicates
 // the original BNE before returning to game code.
 //
-// DISCRIMINANT (s1 register at each hook point):
-//   s1 == 0x004D8C24  →  spell-buff enchant  →  scale
-//   s1 == 0x004D8C6C  →  socketed gem         →  skip (no change)
-//   s1 == heap addr   →  pure elemental spell  →  skip (safety net)
+// DISCRIMINANT (lightning hook — scan all 4 enchant slots for hi16 == 0x0034):
+//   The Lightning Weapons buff writes base-damage hi16=0x0034 into the FIRST
+//   available empty slot in the 4-slot array at s1+0x20..s1+0x38.  Which slot
+//   it occupies depends on what other enchants are already active, so the slot
+//   index is not fixed.  The hi16 positions of the four slots are:
+//     s1+0x22, s1+0x2A, s1+0x32, s1+0x3A   (stride 8, 4 slots)
+//   The guard at 008DA020 jumps to a mini-scanner at 008DA168 that checks each
+//   hi16 in turn; any match of 0x0034 → scale, no match → skip.
+//   Socket gem only: hi16 == 0x0018 in matched slot, never 0x0034 → skip ✓
+//   Fire/Cold hooks still use the old s1 pointer check (not yet investigated).
 //
 // HOOK MAP:
 //   Element    Address   Replaced instruction          Delay slot (NOPped)      Enchant reg  Return
@@ -357,12 +363,14 @@ patch=1,EE,208DA014,extended,E7A10010 // swc1 f1,0x10(sp)
 patch=1,EE,208DA018,extended,E7A20014 // swc1 f2,0x14(sp)
 patch=1,EE,208DA01C,extended,E7A30018 // swc1 f3,0x18(sp)
 
-// ---- GUARD: if s1 != 0x004D8C24 skip to restore (skip_scale = 008DA138)
-// offset = (008DA138 - 008DA028 - 4) / 4 = 0x43
-patch=1,EE,208DA020,extended,3C08004D // lui t0,0x004D
-patch=1,EE,208DA024,extended,35088C24 // ori t0,t0,0x8C24          t0 = 0x004D8C24
-patch=1,EE,208DA028,extended,16280043 // bne s1,t0,0x43            → 008DA138 if not enchant
-patch=1,EE,208DA02C,extended,00000000 // nop
+// ---- GUARD: jump to multi-slot scanner at 008DA168
+// Sets up t0 = s1+0x22 (hi16 addr of slot 0) and t1 = 0x0034 (buff sentinel),
+// then jumps to the scanner.  Scanner checks all 4 slots; any hit jumps back to
+// 008DA030 (scale path); no hit jumps to 008DA138 (skip path).
+patch=1,EE,208DA020,extended,26280022 // addiu t0,s1,0x22          t0 = addr of slot-0 hi16
+patch=1,EE,208DA024,extended,0823685A // j 008DA168                → multi-slot scanner
+patch=1,EE,208DA028,extended,34090034 // [delay] ori t1,zero,0x0034  t1 = 0x0034 sentinel
+patch=1,EE,208DA02C,extended,00000000 // nop (unreachable)
 
 // ---- LOAD INT
 patch=1,EE,208DA030,extended,3C09004E // lui t1,0x004E
@@ -469,4 +477,37 @@ patch=1,EE,208DA15C,extended,4600BDC0 // [delay slot] add.s f23,f23,f0  (displac
 // z_un_0017365c returns here:
 patch=1,EE,208DA160,extended,0807A7D6 // j 001E9F58                back to game
 patch=1,EE,208DA164,extended,00000000 // nop
-// lightning detour end: 008DA168
+
+// ============================================================
+// LIGHTNING GUARD — multi-slot scanner  at 008DA168
+//
+// Entry: t0 = s1+0x22 (hi16 addr of slot 0), t1 = 0x0034 (sentinel)
+// Slots: hi16 positions at s1+0x22, +0x2A, +0x32, +0x3A  (stride 8, 4 slots)
+// Any hi16 == 0x0034  →  Lightning Weapons buff active  →  j 008DA030 (scale)
+// No match            →  j 008DA138 (skip / restore path)
+//
+// Uses only t0 (saved) and t1 (saved).  Each beq delay slot loads the next
+// slot address into t0; if the branch is taken those bytes are discarded
+// harmlessly (008DA030 reinitialises t0/t1 immediately).
+//
+// Branch offset arithmetic (all targets verified):
+//   beq → 008DA030 at PC 008DA16C: offset = (030−170)/4 = −80 = 0xFFB0
+//   beq → 008DA030 at PC 008DA178: offset = (030−17C)/4 = −83 = 0xFFAD
+//   beq → 008DA030 at PC 008DA184: offset = (030−188)/4 = −86 = 0xFFAA
+//   bne → 008DA138 at PC 008DA190: offset = (138−194)/4 = −23 = 0xFFE9
+// ============================================================
+patch=1,EE,208DA168,extended,95080000 // lhu t0,0x00(t0)           t0 = slot-0 hi16
+patch=1,EE,208DA16C,extended,1109FFB0 // beq t0,t1,008DA030        slot 0 == 0x0034? → scale
+patch=1,EE,208DA170,extended,2628002A // [delay] addiu t0,s1,0x2A  t0 = addr of slot-1 hi16
+patch=1,EE,208DA174,extended,95080000 // lhu t0,0x00(t0)           t0 = slot-1 hi16
+patch=1,EE,208DA178,extended,1109FFAD // beq t0,t1,008DA030        slot 1 == 0x0034? → scale
+patch=1,EE,208DA17C,extended,26280032 // [delay] addiu t0,s1,0x32  t0 = addr of slot-2 hi16
+patch=1,EE,208DA180,extended,95080000 // lhu t0,0x00(t0)           t0 = slot-2 hi16
+patch=1,EE,208DA184,extended,1109FFAA // beq t0,t1,008DA030        slot 2 == 0x0034? → scale
+patch=1,EE,208DA188,extended,2628003A // [delay] addiu t0,s1,0x3A  t0 = addr of slot-3 hi16
+patch=1,EE,208DA18C,extended,95080000 // lhu t0,0x00(t0)           t0 = slot-3 hi16
+patch=1,EE,208DA190,extended,1509FFE9 // bne t0,t1,008DA138        no match → skip
+patch=1,EE,208DA194,extended,00000000 // nop
+patch=1,EE,208DA198,extended,0823680C // j 008DA030                slot 3 matched → scale
+patch=1,EE,208DA19C,extended,00000000 // nop
+// lightning guard end: 008DA1A0  (well within 008DA1FF free limit)
