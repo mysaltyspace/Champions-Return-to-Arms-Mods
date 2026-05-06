@@ -35,8 +35,11 @@ description=Elemental damage from Fire/Cold/Lightning Weapons spells scales with
 //   Cold       001E9AD8  jal z_un_00214428    0C08510A add.s f23,f23,f20 4614BDC0 f20       001E9AE0
 //   Lightning  001E9F50  jal z_un_0017365c    0C05CD97 add.s f23,f23,f0  4600BDC0 f0        001E9F58
 //
-// INT address:   0x004D8B84  (P1 only; multiplayer is a stretch goal)
-// Free memory:   008D9C00 – 008DA26F  (INTScaling.pnach ends at 008D9B44)
+// INT address:   per-player via entity slot → stride 0x4C30
+//                P1=004D8B84, P2=004DD7B4, P3=004E23E4, P4=004E7014
+//                player_index = (s4 − 0x006C88C0) / 0x0BB8
+//                fallback to P1 if player_index ≥ 4 or INT reads as 0 (SP quirk)
+// Free memory:   008D9C00 – 008DA2C8  (INTScaling.pnach ends at 008D9B44)
 // ============================================================
 
 // ============================================================
@@ -93,11 +96,10 @@ patch=1,EE,208D9C24,extended,08236870 // j 008DA1C0             → fire scanner
 patch=1,EE,208D9C28,extended,34090015 // [delay] ori t1,zero,0x0015  t1 = fire element code
 patch=1,EE,208D9C2C,extended,00000000 // nop
 
-// ---- LOAD INT from 0x004D8B84 (P1)
-// lui t1,0x004E  →  t1 = 0x004E0000
-// lw  t0,0x8B84(t1)  →  addr = 0x004E0000 + signext(0x8B84) = 0x004D8B84
-patch=1,EE,208D9C30,extended,3C09004E // lui t1,0x004E
-patch=1,EE,208D9C34,extended,8D288B84 // lw t0,0x8B84(t1)       t0 = INT
+// ---- LOAD INT — j-trampoline to per-player lookup at 008D9D70
+// lookup returns to 008D9C38 (float conversion) with t0 = player INT
+patch=1,EE,208D9C30,extended,0823675C // j 008D9D70              → fire INT lookup
+patch=1,EE,208D9C34,extended,00000000 // nop
 
 // ---- CONVERT INT TO FLOAT  (f0 is free — saved above)
 patch=1,EE,208D9C38,extended,44880000 // mtc1 t0,f0
@@ -203,7 +205,41 @@ patch=1,EE,208D9D64,extended,00000000 // nop
 // 008D9D68: fire_taken
 patch=1,EE,208D9D68,extended,0807A654 // j 001E9950              taken (a2 ≠ 0)
 patch=1,EE,208D9D6C,extended,00000000 // nop
-// fire detour end: 008D9D70  (372 bytes total)
+// fire detour end: 008D9D70
+
+// ============================================================
+// FIRE INT LOOKUP  at 008D9D70
+//
+// Entry: s4 = attacking entity pointer.
+// Computes player_index = (s4 − 0x006C88C0) / 0x0BB8.
+// player_index ≥ 4 → invalid entity → fallback to P1 INT.
+// Otherwise: t0 = INT at 0x004D8B84 + player_index × 0x4C30.
+// If that INT == 0 (SP quirk for slot 0): fallback to P1.
+// Returns to 008D9C38 (float conversion) with t0 = INT.
+// ============================================================
+patch=1,EE,208D9D70,extended,3C09006C // lui t1,0x006C
+patch=1,EE,208D9D74,extended,352988C0 // ori t1,t1,0x88C0          t1 = 0x006C88C0 (entity base)
+patch=1,EE,208D9D78,extended,02894023 // subu t0,s4,t1              t0 = s4 − entity_base
+patch=1,EE,208D9D7C,extended,34090BB8 // ori t1,zero,0x0BB8         entity stride (3000 bytes)
+patch=1,EE,208D9D80,extended,0109001B // divu t0,t1
+patch=1,EE,208D9D84,extended,00004012 // mflo t0                    t0 = player_index
+patch=1,EE,208D9D88,extended,2D010004 // sltiu at,t0,4              at=1 if player_index < 4
+patch=1,EE,208D9D8C,extended,10200009 // beq at,zero,+9→008D9DB4   invalid → fallback
+patch=1,EE,208D9D90,extended,3C09004E // [delay] lui t1,0x004E
+patch=1,EE,208D9D94,extended,34094C30 // ori t1,zero,0x4C30         INT per-player stride
+patch=1,EE,208D9D98,extended,01090019 // multu t0,t1                player_index × INT_stride
+patch=1,EE,208D9D9C,extended,00004012 // mflo t0                    t0 = byte offset
+patch=1,EE,208D9DA0,extended,3C09004E // lui t1,0x004E
+patch=1,EE,208D9DA4,extended,25298B84 // addiu t1,t1,0x8B84         t1 = 0x004D8B84 (P1 INT base)
+patch=1,EE,208D9DA8,extended,01094021 // addu t0,t0,t1              t0 = this player's INT address
+patch=1,EE,208D9DAC,extended,8D080000 // lw t0,0(t0)               t0 = player INT
+patch=1,EE,208D9DB0,extended,15000003 // bne t0,zero,+3→008D9DC0   non-zero → use it
+patch=1,EE,208D9DB4,extended,3C09004E // [delay / fallback entry] lui t1,0x004E
+patch=1,EE,208D9DB8,extended,25298B84 // addiu t1,t1,0x8B84         t1 = 0x004D8B84
+patch=1,EE,208D9DBC,extended,8D280000 // lw t0,0(t1)               t0 = P1 fallback INT
+patch=1,EE,208D9DC0,extended,0823670E // j 008D9C38                → float conversion   (return label)
+patch=1,EE,208D9DC4,extended,00000000 // nop
+// fire lookup end: 008D9DC8
 
 // ============================================================
 // COLD WEAPONS DETOUR  at 008D9E00
@@ -239,9 +275,10 @@ patch=1,EE,208D9E24,extended,08236886 // j 008DA218             → cold scanner
 patch=1,EE,208D9E28,extended,34090016 // [delay] ori t1,zero,0x0016  t1 = cold element code
 patch=1,EE,208D9E2C,extended,00000000 // nop
 
-// ---- LOAD INT
-patch=1,EE,208D9E30,extended,3C09004E // lui t1,0x004E
-patch=1,EE,208D9E34,extended,8D288B84 // lw t0,0x8B84(t1)         t0 = INT
+// ---- LOAD INT — j-trampoline to per-player lookup at 008D9F68
+// lookup returns to 008D9E38 (float conversion) with t0 = player INT
+patch=1,EE,208D9E30,extended,082367DA // j 008D9F68              → cold INT lookup
+patch=1,EE,208D9E34,extended,00000000 // nop
 
 // ---- CONVERT INT TO FLOAT  (f0 is free for cold — not the enchant reg)
 patch=1,EE,208D9E38,extended,44880000 // mtc1 t0,f0
@@ -347,6 +384,36 @@ patch=1,EE,208D9F64,extended,00000000 // nop
 // cold detour end: 008D9F68
 
 // ============================================================
+// COLD INT LOOKUP  at 008D9F68
+//
+// Same structure as fire INT lookup.
+// Returns to 008D9E38 (float conversion in cold detour) with t0 = INT.
+// ============================================================
+patch=1,EE,208D9F68,extended,3C09006C // lui t1,0x006C
+patch=1,EE,208D9F6C,extended,352988C0 // ori t1,t1,0x88C0          t1 = 0x006C88C0 (entity base)
+patch=1,EE,208D9F70,extended,02894023 // subu t0,s4,t1              t0 = s4 − entity_base
+patch=1,EE,208D9F74,extended,34090BB8 // ori t1,zero,0x0BB8         entity stride (3000 bytes)
+patch=1,EE,208D9F78,extended,0109001B // divu t0,t1
+patch=1,EE,208D9F7C,extended,00004012 // mflo t0                    t0 = player_index
+patch=1,EE,208D9F80,extended,2D010004 // sltiu at,t0,4              at=1 if player_index < 4
+patch=1,EE,208D9F84,extended,10200009 // beq at,zero,+9→008D9FAC   invalid → fallback
+patch=1,EE,208D9F88,extended,3C09004E // [delay] lui t1,0x004E
+patch=1,EE,208D9F8C,extended,34094C30 // ori t1,zero,0x4C30         INT per-player stride
+patch=1,EE,208D9F90,extended,01090019 // multu t0,t1                player_index × INT_stride
+patch=1,EE,208D9F94,extended,00004012 // mflo t0                    t0 = byte offset
+patch=1,EE,208D9F98,extended,3C09004E // lui t1,0x004E
+patch=1,EE,208D9F9C,extended,25298B84 // addiu t1,t1,0x8B84         t1 = 0x004D8B84 (P1 INT base)
+patch=1,EE,208D9FA0,extended,01094021 // addu t0,t0,t1              t0 = this player's INT address
+patch=1,EE,208D9FA4,extended,8D080000 // lw t0,0(t0)               t0 = player INT
+patch=1,EE,208D9FA8,extended,15000003 // bne t0,zero,+3→008D9FB8   non-zero → use it
+patch=1,EE,208D9FAC,extended,3C09004E // [delay / fallback entry] lui t1,0x004E
+patch=1,EE,208D9FB0,extended,25298B84 // addiu t1,t1,0x8B84         t1 = 0x004D8B84
+patch=1,EE,208D9FB4,extended,8D280000 // lw t0,0(t1)               t0 = P1 fallback INT
+patch=1,EE,208D9FB8,extended,0823678E // j 008D9E38                → float conversion   (return label)
+patch=1,EE,208D9FBC,extended,00000000 // nop
+// cold lookup end: 008D9FC0
+
+// ============================================================
 // LIGHTNING WEAPONS DETOUR  at 008DA000
 //
 // Enchant register: f0 — identical to fire.  Save f0 to sp+0x0C, use
@@ -373,9 +440,10 @@ patch=1,EE,208DA024,extended,0823685A // j 008DA168                → multi-slo
 patch=1,EE,208DA028,extended,34090018 // [delay] ori t1,zero,0x0018  t1 = lightning element code
 patch=1,EE,208DA02C,extended,00000000 // nop (unreachable)
 
-// ---- LOAD INT
-patch=1,EE,208DA030,extended,3C09004E // lui t1,0x004E
-patch=1,EE,208DA034,extended,8D288B84 // lw t0,0x8B84(t1)          t0 = INT
+// ---- LOAD INT — j-trampoline to per-player lookup at 008DA270
+// lookup returns to 008DA038 (float conversion) with t0 = player INT
+patch=1,EE,208DA030,extended,0823689C // j 008DA270              → lightning INT lookup
+patch=1,EE,208DA034,extended,00000000 // nop
 
 // ---- CONVERT INT TO FLOAT  (f0 free — saved above)
 patch=1,EE,208DA038,extended,44880000 // mtc1 t0,f0
@@ -621,3 +689,33 @@ patch=1,EE,208DA264,extended,00000000 // nop
 patch=1,EE,208DA268,extended,0823678C // j 008D9E30                timer != 0 → buff → scale
 patch=1,EE,208DA26C,extended,00000000 // nop
 // cold scanner end: 008DA270
+
+// ============================================================
+// LIGHTNING INT LOOKUP  at 008DA270
+//
+// Same structure as fire INT lookup.
+// Returns to 008DA038 (float conversion in lightning detour) with t0 = INT.
+// ============================================================
+patch=1,EE,208DA270,extended,3C09006C // lui t1,0x006C
+patch=1,EE,208DA274,extended,352988C0 // ori t1,t1,0x88C0          t1 = 0x006C88C0 (entity base)
+patch=1,EE,208DA278,extended,02894023 // subu t0,s4,t1              t0 = s4 − entity_base
+patch=1,EE,208DA27C,extended,34090BB8 // ori t1,zero,0x0BB8         entity stride (3000 bytes)
+patch=1,EE,208DA280,extended,0109001B // divu t0,t1
+patch=1,EE,208DA284,extended,00004012 // mflo t0                    t0 = player_index
+patch=1,EE,208DA288,extended,2D010004 // sltiu at,t0,4              at=1 if player_index < 4
+patch=1,EE,208DA28C,extended,10200009 // beq at,zero,+9→008DA2B4   invalid → fallback
+patch=1,EE,208DA290,extended,3C09004E // [delay] lui t1,0x004E
+patch=1,EE,208DA294,extended,34094C30 // ori t1,zero,0x4C30         INT per-player stride
+patch=1,EE,208DA298,extended,01090019 // multu t0,t1                player_index × INT_stride
+patch=1,EE,208DA29C,extended,00004012 // mflo t0                    t0 = byte offset
+patch=1,EE,208DA2A0,extended,3C09004E // lui t1,0x004E
+patch=1,EE,208DA2A4,extended,25298B84 // addiu t1,t1,0x8B84         t1 = 0x004D8B84 (P1 INT base)
+patch=1,EE,208DA2A8,extended,01094021 // addu t0,t0,t1              t0 = this player's INT address
+patch=1,EE,208DA2AC,extended,8D080000 // lw t0,0(t0)               t0 = player INT
+patch=1,EE,208DA2B0,extended,15000003 // bne t0,zero,+3→008DA2C0   non-zero → use it
+patch=1,EE,208DA2B4,extended,3C09004E // [delay / fallback entry] lui t1,0x004E
+patch=1,EE,208DA2B8,extended,25298B84 // addiu t1,t1,0x8B84         t1 = 0x004D8B84
+patch=1,EE,208DA2BC,extended,8D280000 // lw t0,0(t1)               t0 = P1 fallback INT
+patch=1,EE,208DA2C0,extended,0823680E // j 008DA038                → float conversion   (return label)
+patch=1,EE,208DA2C4,extended,00000000 // nop
+// lightning lookup end: 008DA2C8
