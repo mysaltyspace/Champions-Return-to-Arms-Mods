@@ -16,16 +16,15 @@ description=Elemental damage from Fire/Cold/Lightning Weapons spells scales with
 // displaced add.s, and (5) calls the original JAL target / replicates
 // the original BNE before returning to game code.
 //
-// DISCRIMINANT (lightning hook — scan all 4 enchant slots for hi16 == 0x0034):
-//   The Lightning Weapons buff writes base-damage hi16=0x0034 into the FIRST
-//   available empty slot in the 4-slot array at s1+0x20..s1+0x38.  Which slot
-//   it occupies depends on what other enchants are already active, so the slot
-//   index is not fixed.  The hi16 positions of the four slots are:
-//     s1+0x22, s1+0x2A, s1+0x32, s1+0x3A   (stride 8, 4 slots)
-//   The guard at 008DA020 jumps to a mini-scanner at 008DA168 that checks each
-//   hi16 in turn; any match of 0x0034 → scale, no match → skip.
-//   Socket gem only: hi16 == 0x0018 in matched slot, never 0x0034 → skip ✓
-//   Fire/Cold hooks still use the old s1 pointer check (not yet investigated).
+// DISCRIMINANT (all three hooks — multi-slot scanner checks hi16 in all 4 enchant slots):
+//   Each Weapons buff writes its type code into the FIRST available empty slot in the
+//   4-slot array at s1+0x20..s1+0x38.  Slot index is not fixed — depends on active enchants.
+//   Hi16 positions: s1+0x22, s1+0x2A, s1+0x32, s1+0x3A  (stride 8, 4 slots).
+//   Sentinels: Fire=0x001F  Cold=0x0038  Lightning=0x0034
+//   Scanners: Fire@008DA1A0, Cold@008DA1E0, Lightning@008DA168
+//   Socket gems have different hi16 (e.g. 0x001B for lightning gem) → always miss → skip ✓
+//   Note: cold buff word1 is non-zero (0x02D70043 observed), so hi16 is used as discriminant
+//   for all three elements — word1==0 is not a universal test.
 //
 // HOOK MAP:
 //   Element    Address   Replaced instruction          Delay slot (NOPped)      Enchant reg  Return
@@ -84,11 +83,11 @@ patch=1,EE,208D9C14,extended,E7A10010 // swc1 f1,0x10(sp)
 patch=1,EE,208D9C18,extended,E7A20014 // swc1 f2,0x14(sp)
 patch=1,EE,208D9C1C,extended,E7A30018 // swc1 f3,0x18(sp)
 
-// ---- GUARD: if s1 != 0x004D8C24 skip to restore (skip_scale = 008D9D38)
-// offset = (008D9D38 - 008D9C28 - 4) / 4 = 0x43
-patch=1,EE,208D9C20,extended,3C08004D // lui t0,0x004D
-patch=1,EE,208D9C24,extended,35088C24 // ori t0,t0,0x8C24       t0 = 0x004D8C24
-patch=1,EE,208D9C28,extended,16280043 // bne s1,t0,0x43         → 008D9D38 (restore) if socket/spell
+// ---- GUARD: jump to multi-slot fire scanner at 008DA1A0
+// sentinel 0x001F (Fire Weapons buff hi16); match → 008D9C30 (scale); no match → 008D9D38 (skip)
+patch=1,EE,208D9C20,extended,26280022 // addiu t0,s1,0x22       t0 = addr of slot-0 hi16
+patch=1,EE,208D9C24,extended,08236868 // j 008DA1A0             → fire scanner
+patch=1,EE,208D9C28,extended,3409001F // [delay] ori t1,zero,0x001F  t1 = fire sentinel
 patch=1,EE,208D9C2C,extended,00000000 // nop
 
 // ---- LOAD INT from 0x004D8B84 (P1)
@@ -230,11 +229,11 @@ patch=1,EE,208D9E14,extended,E7A10010 // swc1 f1,0x10(sp)
 patch=1,EE,208D9E18,extended,E7A20014 // swc1 f2,0x14(sp)
 patch=1,EE,208D9E1C,extended,E7A30018 // swc1 f3,0x18(sp)
 
-// ---- GUARD: if s1 != 0x004D8C24 skip to restore (skip_scale = 008D9F38)
-// offset = (008D9F38 - 008D9E28 - 4) / 4 = 0x43
-patch=1,EE,208D9E20,extended,3C08004D // lui t0,0x004D
-patch=1,EE,208D9E24,extended,35088C24 // ori t0,t0,0x8C24         t0 = 0x004D8C24
-patch=1,EE,208D9E28,extended,16280043 // bne s1,t0,0x43           → 008D9F38 if not enchant
+// ---- GUARD: jump to multi-slot cold scanner at 008DA1E0
+// sentinel 0x0038 (Cold Weapons buff hi16); match → 008D9E30 (scale); no match → 008D9F38 (skip)
+patch=1,EE,208D9E20,extended,26280022 // addiu t0,s1,0x22       t0 = addr of slot-0 hi16
+patch=1,EE,208D9E24,extended,08236878 // j 008DA1E0             → cold scanner
+patch=1,EE,208D9E28,extended,34090038 // [delay] ori t1,zero,0x0038  t1 = cold sentinel
 patch=1,EE,208D9E2C,extended,00000000 // nop
 
 // ---- LOAD INT
@@ -510,4 +509,65 @@ patch=1,EE,208DA190,extended,1509FFE9 // bne t0,t1,008DA138        no match → 
 patch=1,EE,208DA194,extended,00000000 // nop
 patch=1,EE,208DA198,extended,0823680C // j 008DA030                slot 3 matched → scale
 patch=1,EE,208DA19C,extended,00000000 // nop
-// lightning guard end: 008DA1A0  (well within 008DA1FF free limit)
+// lightning scanner end: 008DA1A0
+
+// ============================================================
+// FIRE GUARD — multi-slot scanner  at 008DA1A0
+//
+// Entry: t0 = s1+0x22 (hi16 addr of slot 0), t1 = 0x001F (sentinel)
+// Any hi16 == 0x001F  →  Fire Weapons buff active  →  j 008D9C30 (scale)
+// No match            →  j 008D9D38 (skip / restore path)
+//
+// Branch offset arithmetic (all targets verified):
+//   beq → 008D9C30 at PC 008DA1A4: offset = (9C30−A1A8)/4 = −0x15E = 0xFEA2
+//   beq → 008D9C30 at PC 008DA1B0: offset = (9C30−A1B4)/4 = −0x161 = 0xFE9F
+//   beq → 008D9C30 at PC 008DA1BC: offset = (9C30−A1C0)/4 = −0x164 = 0xFE9C
+//   bne → 008D9D38 at PC 008DA1C8: offset = (9D38−A1CC)/4 = −0x125 = 0xFEDB
+// ============================================================
+patch=1,EE,208DA1A0,extended,95080000 // lhu t0,0x00(t0)           t0 = slot-0 hi16
+patch=1,EE,208DA1A4,extended,1109FEA2 // beq t0,t1,008D9C30        slot 0 == 0x001F? → scale
+patch=1,EE,208DA1A8,extended,2628002A // [delay] addiu t0,s1,0x2A  t0 = addr of slot-1 hi16
+patch=1,EE,208DA1AC,extended,95080000 // lhu t0,0x00(t0)           t0 = slot-1 hi16
+patch=1,EE,208DA1B0,extended,1109FE9F // beq t0,t1,008D9C30        slot 1 == 0x001F? → scale
+patch=1,EE,208DA1B4,extended,26280032 // [delay] addiu t0,s1,0x32  t0 = addr of slot-2 hi16
+patch=1,EE,208DA1B8,extended,95080000 // lhu t0,0x00(t0)           t0 = slot-2 hi16
+patch=1,EE,208DA1BC,extended,1109FE9C // beq t0,t1,008D9C30        slot 2 == 0x001F? → scale
+patch=1,EE,208DA1C0,extended,2628003A // [delay] addiu t0,s1,0x3A  t0 = addr of slot-3 hi16
+patch=1,EE,208DA1C4,extended,95080000 // lhu t0,0x00(t0)           t0 = slot-3 hi16
+patch=1,EE,208DA1C8,extended,1509FEDB // bne t0,t1,008D9D38        no match → skip
+patch=1,EE,208DA1CC,extended,00000000 // nop
+patch=1,EE,208DA1D0,extended,0823670C // j 008D9C30                slot 3 matched → scale
+patch=1,EE,208DA1D4,extended,00000000 // nop
+// fire scanner end: 008DA1D8
+
+// ============================================================
+// COLD GUARD — multi-slot scanner  at 008DA1E0
+//
+// Entry: t0 = s1+0x22 (hi16 addr of slot 0), t1 = 0x0038 (sentinel)
+// Any hi16 == 0x0038  →  Cold Weapons buff active  →  j 008D9E30 (scale)
+// No match            →  j 008D9F38 (skip / restore path)
+//
+// Note: cold buff word1 is non-zero (0x02D70043 observed), so hi16=0x0038
+// is used as discriminant rather than word1==0.
+//
+// Branch offset arithmetic (all targets verified):
+//   beq → 008D9E30 at PC 008DA1E4: offset = (9E30−A1E8)/4 = −0x0EE = 0xFF12
+//   beq → 008D9E30 at PC 008DA1F0: offset = (9E30−A1F4)/4 = −0x0F1 = 0xFF0F
+//   beq → 008D9E30 at PC 008DA1FC: offset = (9E30−A200)/4 = −0x0F4 = 0xFF0C
+//   bne → 008D9F38 at PC 008DA208: offset = (9F38−A20C)/4 = −0x0B5 = 0xFF4B
+// ============================================================
+patch=1,EE,208DA1E0,extended,95080000 // lhu t0,0x00(t0)           t0 = slot-0 hi16
+patch=1,EE,208DA1E4,extended,1109FF12 // beq t0,t1,008D9E30        slot 0 == 0x0038? → scale
+patch=1,EE,208DA1E8,extended,2628002A // [delay] addiu t0,s1,0x2A  t0 = addr of slot-1 hi16
+patch=1,EE,208DA1EC,extended,95080000 // lhu t0,0x00(t0)           t0 = slot-1 hi16
+patch=1,EE,208DA1F0,extended,1109FF0F // beq t0,t1,008D9E30        slot 1 == 0x0038? → scale
+patch=1,EE,208DA1F4,extended,26280032 // [delay] addiu t0,s1,0x32  t0 = addr of slot-2 hi16
+patch=1,EE,208DA1F8,extended,95080000 // lhu t0,0x00(t0)           t0 = slot-2 hi16
+patch=1,EE,208DA1FC,extended,1109FF0C // beq t0,t1,008D9E30        slot 2 == 0x0038? → scale
+patch=1,EE,208DA200,extended,2628003A // [delay] addiu t0,s1,0x3A  t0 = addr of slot-3 hi16
+patch=1,EE,208DA204,extended,95080000 // lhu t0,0x00(t0)           t0 = slot-3 hi16
+patch=1,EE,208DA208,extended,1509FF4B // bne t0,t1,008D9F38        no match → skip
+patch=1,EE,208DA20C,extended,00000000 // nop
+patch=1,EE,208DA210,extended,0823678C // j 008D9E30                slot 3 matched → scale
+patch=1,EE,208DA214,extended,00000000 // nop
+// cold scanner end: 008DA218
