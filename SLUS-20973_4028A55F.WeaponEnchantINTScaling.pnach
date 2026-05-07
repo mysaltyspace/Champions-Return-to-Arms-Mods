@@ -818,7 +818,7 @@ patch=1,EE,208DA2FC,extended,00000000 // nop
 
 // ---- FOUND (008DA300): slot matched — check timer to distinguish buff from gem
 patch=1,EE,208DA300,extended,94780006 // lhu t8,0x6(v1)            t8 = cccc (timer; hi16 of word1)
-patch=1,EE,208DA304,extended,1300001A // beq t8,zero,+26 → 008DA370  timer==0 → gem → skip
+patch=1,EE,208DA304,extended,1300001B // beq t8,zero,+27 → 008DA374  timer==0 → gem → skip exit
 patch=1,EE,208DA308,extended,00000000 // nop
 
 // ---- LOAD MIN / MAX DAMAGE
@@ -846,15 +846,150 @@ patch=1,EE,208DA34C,extended,0145001A // div t2,a1                  LO = quotien
 patch=1,EE,208DA350,extended,00005010 // mfhi t2                    t2 = rng_sample mod range
 patch=1,EE,208DA354,extended,010A5021 // addu t2,t0,t2              t2 = min + remainder
 
-// ---- APPLY RESISTANCE: net = damage * (1 - resistance); add to f23
+// ---- APPLY RESISTANCE: net = damage * (1 - resistance); then jump to INT scaling
 patch=1,EE,208DA358,extended,448A0000 // mtc1 t2,f00                f00 = damage (int)
 patch=1,EE,208DA35C,extended,46800020 // cvt.s.w f00,f00            f00 = float(damage)
 patch=1,EE,208DA360,extended,C641005C // lwc1 f01,0x5C(s2)          f01 = resistance factor
 patch=1,EE,208DA364,extended,46010042 // mul.s f01,f00,f01          f01 = damage * resistance
-patch=1,EE,208DA368,extended,46010001 // sub.s f00,f00,f01          f00 = damage * (1 - resistance)
-patch=1,EE,208DA36C,extended,4600BDC0 // add.s f23,f23,f00          f23 += net elemental damage
+patch=1,EE,208DA368,extended,46010001 // sub.s f00,f00,f01          f00 = net damage (damage*(1-resist))
+patch=1,EE,208DA36C,extended,082368DF // j 008DA37C                 → INT scaling block
+patch=1,EE,208DA370,extended,00000000 // nop                        [delay slot of above j]
 
-// ---- EXIT (008DA370): return to 001E9820 (fire scanner re-initializes its own regs)
-patch=1,EE,208DA370,extended,0807A608 // j 001E9820
-patch=1,EE,208DA374,extended,00000000 // nop
-// detour end: 008DA378
+// ---- GEM/SKIP EXIT (008DA374): timer==0 → socket gem → return without damage or scaling
+// f00 is NOT zeroed on this path; value at hook entry is preserved (same as pre-patch behaviour).
+patch=1,EE,208DA374,extended,0807A608 // j 001E9820
+patch=1,EE,208DA378,extended,00000000 // nop
+
+// ============================================================
+// DISEASE/POISON INT SCALING BLOCK  at 008DA37C  (89 instructions, 356 bytes → ends 008DA4E0)
+//
+// Entry: f00 = net elemental damage (resistance already applied); s4 = player entity ptr
+// Does per-player INT lookup (same stride formula as Fire/Cold/Lightning lookup routines),
+// computes tiered bonus (identical to Fire detour register layout and constants),
+// multiplies net damage by (1.0+bonus), adds to f23, then ZEROS f00 before returning.
+//
+// WHY ZERO f00: the Fire INT scaling detour at 001E9928 always runs after us (fire scanner
+// finds nothing for a disease/poison weapon but still hits the hook). Its skip-path return
+// code does:  add.s f23,f23,f00  (displaced bne delay slot). If f00 != 0 at that point it
+// would double-add disease/poison damage. Zeroing f00 makes that add.s a no-op.
+//
+// Stack frame: -8 bytes; f00 (net_damage) saved at sp+0x00.
+//
+// Register layout (same as Fire detour tiers):
+//   f0 = bonus accumulator (0.0 init; multiplier = 1.0+bonus at apply step)
+//   f1 = constant temp (reloaded each tier use)
+//   f2 = float(INT)
+//   f3 = tier scratch / net_damage (loaded from stack at apply step)
+// f1,f2,f3 clobbered but restored by Fire INT detour's own stack frame on its return path.
+// ============================================================
+
+// ---- STACK SETUP: save net_damage so f0 is free for bonus accumulator
+patch=1,EE,208DA37C,extended,27BDFFF8 // addiu sp,sp,-8
+patch=1,EE,208DA380,extended,E7A00000 // swc1 f00,0x00(sp)          save net_damage
+
+// ---- PER-PLAYER INT LOOKUP (inline — same logic as routines at 008D9D70/008D9F68/008DA270)
+patch=1,EE,208DA384,extended,3C09006C // lui t1,0x006C
+patch=1,EE,208DA388,extended,352988C0 // ori t1,t1,0x88C0            t1 = 0x006C88C0 (entity base)
+patch=1,EE,208DA38C,extended,02894023 // subu t0,s4,t1               t0 = s4 − entity_base
+patch=1,EE,208DA390,extended,34090BB8 // ori t1,zero,0x0BB8          entity stride (3000 bytes)
+patch=1,EE,208DA394,extended,0109001B // divu t0,t1
+patch=1,EE,208DA398,extended,00004012 // mflo t0                     t0 = player_index
+patch=1,EE,208DA39C,extended,2D010004 // sltiu at,t0,4               at=1 if player_index < 4
+patch=1,EE,208DA3A0,extended,10200009 // beq at,zero,+9 → 008DA3C8   invalid → fallback
+patch=1,EE,208DA3A4,extended,3C09004E // [delay] lui t1,0x004E
+patch=1,EE,208DA3A8,extended,34094C30 // ori t1,zero,0x4C30          INT per-player stride
+patch=1,EE,208DA3AC,extended,01090019 // multu t0,t1                 player_index × stride
+patch=1,EE,208DA3B0,extended,00004012 // mflo t0                     t0 = byte offset
+patch=1,EE,208DA3B4,extended,3C09004E // lui t1,0x004E
+patch=1,EE,208DA3B8,extended,25298B84 // addiu t1,t1,0x8B84          t1 = 0x004D8B84 (P1 INT base)
+patch=1,EE,208DA3BC,extended,01094021 // addu t0,t0,t1               t0 = this player's INT addr
+patch=1,EE,208DA3C0,extended,8D080000 // lw t0,0(t0)                 t0 = player INT
+patch=1,EE,208DA3C4,extended,15000003 // bne t0,zero,+3 → 008DA3D4   non-zero → use it
+patch=1,EE,208DA3C8,extended,3C09004E // [delay / fallback entry] lui t1,0x004E
+patch=1,EE,208DA3CC,extended,25298B84 // addiu t1,t1,0x8B84
+patch=1,EE,208DA3D0,extended,8D280000 // lw t0,0(t1)                 t0 = P1 fallback INT
+// 008DA3D4: t0 = player INT
+
+// ---- CONVERT INT TO FLOAT; init bonus accumulator (same register layout as Fire detour)
+patch=1,EE,208DA3D4,extended,44881000 // mtc1 t0,f2                  f2 = INT (int)
+patch=1,EE,208DA3D8,extended,468010A0 // cvt.s.w f2,f2               f2 = float(INT)
+patch=1,EE,208DA3DC,extended,44800000 // mtc1 zero,f0                f0 = 0.0 (bonus accumulator)
+
+// ---- TIER 1: INT 20–100, +0.5%/pt  (identical encodings to Fire detour tiers)
+patch=1,EE,208DA3E0,extended,3C0942C8 // lui t1,0x42C8               100.0f
+patch=1,EE,208DA3E4,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208DA3E8,extended,460110E9 // min.s f3,f2,f1              f3 = min(INT,100)
+patch=1,EE,208DA3EC,extended,3C0941A0 // lui t1,0x41A0               20.0f
+patch=1,EE,208DA3F0,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208DA3F4,extended,460118C1 // sub.s f3,f3,f1              f3 = min(INT,100) − 20
+patch=1,EE,208DA3F8,extended,46030034 // c.lt.s f0,f3                FCC = (0.0 < f3) = (INT > 20)
+patch=1,EE,208DA3FC,extended,45000006 // bc1f +6 → 008DA418          skip if INT ≤ 20
+patch=1,EE,208DA400,extended,00000000 // nop
+patch=1,EE,208DA404,extended,3C093BA3 // lui t1,0x3BA3
+patch=1,EE,208DA408,extended,3529D70A // ori t1,t1,0xD70A            0.005f
+patch=1,EE,208DA40C,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208DA410,extended,460118C2 // mul.s f3,f3,f1              pts_in_t1 * 0.005
+patch=1,EE,208DA414,extended,46030000 // add.s f0,f0,f3              accumulate
+// 008DA418: skip_t1
+
+// ---- TIER 2: INT 100–200, +0.4%/pt
+patch=1,EE,208DA418,extended,3C094348 // lui t1,0x4348               200.0f
+patch=1,EE,208DA41C,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208DA420,extended,460110E9 // min.s f3,f2,f1              f3 = min(INT,200)
+patch=1,EE,208DA424,extended,3C0942C8 // lui t1,0x42C8               100.0f
+patch=1,EE,208DA428,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208DA42C,extended,460118C1 // sub.s f3,f3,f1              f3 = min(INT,200) − 100
+patch=1,EE,208DA430,extended,46030034 // c.lt.s f0,f3
+patch=1,EE,208DA434,extended,45000006 // bc1f +6 → 008DA450          skip if INT ≤ 100
+patch=1,EE,208DA438,extended,00000000 // nop
+patch=1,EE,208DA43C,extended,3C093B83 // lui t1,0x3B83
+patch=1,EE,208DA440,extended,3529126F // ori t1,t1,0x126F            0.004f
+patch=1,EE,208DA444,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208DA448,extended,460118C2 // mul.s f3,f3,f1              pts_in_t2 * 0.004
+patch=1,EE,208DA44C,extended,46030000 // add.s f0,f0,f3              accumulate
+// 008DA450: skip_t2
+
+// ---- TIER 3: INT 200–300, +0.3%/pt
+patch=1,EE,208DA450,extended,3C094396 // lui t1,0x4396               300.0f
+patch=1,EE,208DA454,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208DA458,extended,460110E9 // min.s f3,f2,f1              f3 = min(INT,300)
+patch=1,EE,208DA45C,extended,3C094348 // lui t1,0x4348               200.0f
+patch=1,EE,208DA460,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208DA464,extended,460118C1 // sub.s f3,f3,f1              f3 = min(INT,300) − 200
+patch=1,EE,208DA468,extended,46030034 // c.lt.s f0,f3
+patch=1,EE,208DA46C,extended,45000006 // bc1f +6 → 008DA488          skip if INT ≤ 200
+patch=1,EE,208DA470,extended,00000000 // nop
+patch=1,EE,208DA474,extended,3C093B44 // lui t1,0x3B44
+patch=1,EE,208DA478,extended,35299BA6 // ori t1,t1,0x9BA6            0.003f
+patch=1,EE,208DA47C,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208DA480,extended,460118C2 // mul.s f3,f3,f1              pts_in_t3 * 0.003
+patch=1,EE,208DA484,extended,46030000 // add.s f0,f0,f3              accumulate
+// 008DA488: skip_t3
+
+// ---- TIER 4: INT 300+, +0.2%/pt
+patch=1,EE,208DA488,extended,460010C6 // mov.s f3,f2                 f3 = float(INT)
+patch=1,EE,208DA48C,extended,3C094396 // lui t1,0x4396               300.0f
+patch=1,EE,208DA490,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208DA494,extended,460118C1 // sub.s f3,f3,f1              f3 = INT − 300
+patch=1,EE,208DA498,extended,46030034 // c.lt.s f0,f3
+patch=1,EE,208DA49C,extended,45000006 // bc1f +6 → 008DA4B8          skip if INT ≤ 300
+patch=1,EE,208DA4A0,extended,00000000 // nop
+patch=1,EE,208DA4A4,extended,3C093B03 // lui t1,0x3B03
+patch=1,EE,208DA4A8,extended,3529126F // ori t1,t1,0x126F            0.002f
+patch=1,EE,208DA4AC,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208DA4B0,extended,460118C2 // mul.s f3,f3,f1              pts_above_300 * 0.002
+patch=1,EE,208DA4B4,extended,46030000 // add.s f0,f0,f3              accumulate
+// 008DA4B8: skip_t4
+
+// ---- APPLY: build multiplier, scale net_damage, add to f23, zero f00
+patch=1,EE,208DA4B8,extended,3C093F80 // lui t1,0x3F80               1.0f
+patch=1,EE,208DA4BC,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208DA4C0,extended,46000800 // add.s f0,f1,f0              f0 = 1.0 + bonus = multiplier
+patch=1,EE,208DA4C4,extended,C7A30000 // lwc1 f3,0x00(sp)            f3 = net_damage (from stack)
+patch=1,EE,208DA4C8,extended,46001802 // mul.s f0,f3,f0              f0 = net_damage × multiplier
+patch=1,EE,208DA4CC,extended,4600BDC0 // add.s f23,f23,f00           f23 += scaled disease/poison damage
+patch=1,EE,208DA4D0,extended,44800000 // mtc1 zero,f00               f0 = 0.0  ← prevents Fire INT detour
+patch=1,EE,208DA4D4,extended,27BD0008 // addiu sp,sp,8               restore stack
+patch=1,EE,208DA4D8,extended,0807A608 // j 001E9820
+patch=1,EE,208DA4DC,extended,00000000 // nop
+// INT scaling block end: 008DA4E0
