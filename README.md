@@ -85,7 +85,7 @@ Fixes **Disease Blade** (Shadow Knight) and **Poison Weapon** (Shaman) dealing n
 ### Shield Bash Defense Scaling
 `custom patches/SLUS-20973_4028A55F.INTScaling.pnach` — second checkbox in PCSX2
 
-Makes **Shield Bash** damage scale with the Paladin's **total armor**. Rewards armor-focused builds without making the ability overpowered at low gear levels.
+Makes **Shield Bash** damage scale with **total armor** (Cleric, Barbarian, Shadow Knight). Rewards armor-focused builds without making the ability overpowered at low gear levels.
 
 > **Requires the INT Scaling checkbox to also be enabled** — the Shield Bash section reuses the INT Scaling hook and register save/restore code.
 
