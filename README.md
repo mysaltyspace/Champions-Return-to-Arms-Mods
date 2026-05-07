@@ -53,7 +53,7 @@ Makes the elemental damage bonus from **Fire Weapons**, **Cold Weapons**, and **
 
 #### What does NOT scale
 - Socketed gem elemental damage (intentionally excluded — different damage source)
-- Disease/Poison Weapons (base game bug — no elemental component to scale)
+- Disease/Poison Weapons — see Disease Blade On-Hit Fix section below
 - Base weapon physical damage
 
 #### How it works
@@ -71,7 +71,14 @@ Three hook points intercept the game's elemental-merge instruction for each ench
 | 300 | +110% |
 | 400 | +130% |
 
-> **Note:** Currently reads Player 1's INT only. Multiplayer support (each player's own INT) is a stretch goal.
+> **Note:** Each player's elemental damage scales off their own INT. Verified working in 2-player; 3- and 4-player use the same formula.
+
+---
+
+### Disease Blade On-Hit Fix
+`custom patches/SLUS-20973_4028A55F.WeaponEnchantINTScaling.pnach` — second checkbox
+
+Fixes **Disease Blade** (Shadow Knight) and **Poison Weapon** (Shaman) dealing no on-hit elemental damage. The base game has a bug in `z_un_001e8230` (the universal weapon-enchant elemental handler): a flag in the player entity struct has bit 17 set for disease/poison hits, causing the function to exit early before computing any damage. This patch NOPs that early-exit branch (`001E82A0`), allowing disease and poison hits to proceed through the same elemental damage path used by fire, cold, and lightning.
 
 ---
 
