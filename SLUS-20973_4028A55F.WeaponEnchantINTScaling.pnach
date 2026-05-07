@@ -1,7 +1,7 @@
 gametitle=Champions: Return to Arms * NTSC-U * SLUS-20973 * 4028A55F
 [Weapon Enchant INT Scaling]
 author=mysaltyspace (made by Claude code)
-description=Elemental damage from Fire/Cold/Lightning Weapons spells scales with INT. Same tiered formula as INTScaling: 0.5%/pt to 100, 0.4%/pt to 200, 0.3%/pt to 300, 0.2%/pt beyond. Socketed gem elemental unaffected. Compatible with INTScaling patch (enable independently). Disease/Poison Weapons excluded (base game bugs -- deal no elemental damage).
+description=Elemental damage from Fire/Cold/Lightning Weapons spells scales with INT. Same tiered formula as INTScaling: 0.5%/pt to 100, 0.4%/pt to 200, 0.3%/pt to 300, 0.2%/pt beyond. Socketed gem elemental unaffected. Compatible with INTScaling patch (enable independently). Disease Blade on-hit fix available as second section (enable independently).
 
 // ============================================================
 // HOW THIS WORKS
@@ -719,3 +719,142 @@ patch=1,EE,208DA2BC,extended,8D280000 // lw t0,0(t1)               t0 = P1 fallb
 patch=1,EE,208DA2C0,extended,0823680E // j 008DA038                → float conversion   (return label)
 patch=1,EE,208DA2C4,extended,00000000 // nop
 // lightning lookup end: 008DA2C8
+
+// ============================================================
+// SECTION 2: DISEASE BLADE / POISON WEAPON ON-HIT FIX
+// ============================================================
+[Disease Blade On-Hit Fix]
+author=mysaltyspace (made by Claude code)
+description=Fixes Disease Blade (Shadow Knight) and Poison Weapon (Shaman) dealing no on-hit elemental damage. Two-part fix: (1) NOP at 001E82A0 lets disease/poison pass z_un_001e8230's early-exit gate. (2) Hook at 001E9818 adds a scanner+damage-computation detour at 008DA2C8 for both element codes (0x0026 disease, 0x0017 poison) using the same LCG RNG and resistance formula as the Fire/Cold/Lightning handlers. Can be enabled without Weapon Enchant INT Scaling.
+
+// ============================================================
+// HOW THIS WORKS
+// ============================================================
+// z_un_001e8230 (universal on-hit elemental handler) has two problems for
+// disease (0x0026) and poison (0x0017):
+//
+// PROBLEM 1 — early-exit gate at 001E82A0:
+//   001E8294: 8E83000C  lw  v1,0xC(s4)
+//   001E8298: 3C040002  lui a0,0x0002          // mask = 0x00020000 (bit 17)
+//   001E829C: 00641824  and v1,v1,a0
+//   001E82A0: 14600A73  bne v1,zero,001EAC70   // bit17 SET → exit early, no damage
+//   Debugger confirmed: disease hit v1=0x6C426573... (bit17 SET) → exits; socket gem v1=0 → continues.
+//   FIX 1: NOP the bne.  Delay slot (daddu v0,zero,zero) executes harmlessly.
+//
+// PROBLEM 2 — no disease/poison handler in the second half of z_un_001e8230:
+//   After the NOP, disease/poison continue to 001E8A14 (bit17 SET → don't exit again)
+//   → 001E8E64: beq s6,zero,001E9770 (s6=0, no scanner matched) → 001E9770
+//   → 001E9770–001E97A8: 0x1B scanner (disease not found) → falls to 001E9818
+//   → 001E9818: addiu a2,zero,0x15 (start of fire scanner — disease ignored here too)
+//   → fire scanner finds nothing → 001E9998 → epilogue → zero elemental damage.
+//
+//   There is no handler for element codes 0x0026 (disease) or 0x0017 (poison).
+//
+//   FIX 2: Hook at 001E9818 (disease ALWAYS reaches this instruction).
+//   Detour at 008DA2C8 scans all 4 enchant slots for disease OR poison:
+//     - check bbbb (lo16 of word0) for 0x0026 or 0x0017
+//     - if found, check cccc (hi16 of word1) = timer; 0 = gem → skip
+//     - if timer > 0 (spell buff): compute elemental damage with LCG RNG + resistance
+//       formula, add result to f23 (same as Fire/Cold/Lightning handlers)
+//     - return to 001E9820 (fire scanner body which re-initializes its own vars)
+//   Fire scanner then runs but finds no 0x0015 entry → exits with no additional damage.
+//   The displaced instructions (addiu a2,zero,0x15 / daddu a0,zero,zero) are replicated
+//   at the top of the detour so the fire scanner behaves identically on return.
+//
+// SLOT LAYOUT (per CLAUDE.md):
+//   word0 at s1+0x20/0x28/0x30/0x38 (stride 8): lo16=bbbb=element code, hi16=aaaa=min_damage
+//   word1 at s1+0x24/0x2C/0x34/0x3C:            hi16=cccc=timer (>0 buff, 0 gem), lo16=dddd=max_damage
+//   lhu t8,0x0(v1)  → bbbb  (element code);  check 0x0026 then 0x0017
+//   lhu t8,0x6(v1)  → cccc  (timer);         0 → skip, nonzero → buff
+//   lhu t0,0x2(v1)  → aaaa  (min_damage)
+//   lhu a1,0x4(v1)  → dddd  (max_damage)
+//
+// LCG RNG:  state at 0x00404464; new = old*0x0019660D + 0x3C6EF35F; damage_rng = new>>16
+// RESISTANCE: f01 = *(s2+0x5C); net_damage = damage*(1.0-f01); add.s f23,f23,f00
+// ============================================================
+
+// ---- FIX 1: NOP the early-exit branch (gate 1 — before second half of z_un_001e8230)
+patch=1,EE,201E82A0,extended,00000000 // nop  (was: bne v1,zero,001EAC70 = 14600A73)
+
+// ---- FIX 2: Hook at 001E9818 (replaces addiu a2,zero,0x15 with j to detour)
+patch=1,EE,201E9818,extended,082368B2 // j 008DA2C8  (was: addiu a2,zero,0x15 = 24060015)
+patch=1,EE,201E981C,extended,00000000 // nop         (was: daddu a0,zero,zero  = 0000202D)
+
+// ============================================================
+// DISEASE/POISON DETOUR  at 008DA2C8  (44 instructions, 176 bytes → ends 008DA378)
+//
+// Entry state: s1=weapon struct ptr, s2=enemy entity ptr, f23=damage accum
+// Registers used: a2,a0,v1,t6,t7,t8,t9 (scanner); at,t0,t2,t3,a1 (RNG+damage); f00,f01
+// No stack frame needed — temp registers only, all caller-saved.
+//
+// Return: j 001E9820 from both paths (not_found and exit).
+//   001E9820 = addiu v1,s1,0x20  (first instruction of fire scanner body).
+//   a2 is already 0x15 (replicated below) so fire scanner is consistent.
+// ============================================================
+
+// ---- REPLICATE displaced instructions (were at 001E9818/001E981C)
+patch=1,EE,208DA2C8,extended,24060015 // addiu a2,zero,0x15       (fire element code for fire scanner)
+patch=1,EE,208DA2CC,extended,0000202D // daddu a0,zero,zero        (clears a0 as original did)
+
+// ---- SCANNER SETUP
+patch=1,EE,208DA2D0,extended,24190004 // addiu t9,zero,4           slot counter (4 slots)
+patch=1,EE,208DA2D4,extended,26230020 // addiu v1,s1,0x20          v1 = &slot[0]
+patch=1,EE,208DA2D8,extended,240F0026 // addiu t7,zero,0x26        t7 = disease element code
+
+// ---- SLOT SCAN LOOP (008DA2DC)
+// For each slot: check bbbb==disease OR bbbb==poison; advance pointer; repeat.
+// bnel (branch likely): delay slot SQUASHED if branch NOT taken (t9==0 → exit loop cleanly).
+patch=1,EE,208DA2DC,extended,94780000 // lhu t8,0x0(v1)            t8 = bbbb (element code)
+patch=1,EE,208DA2E0,extended,130F0007 // beq t8,t7,+7 → 008DA300  disease? → found
+patch=1,EE,208DA2E4,extended,240E0017 // [delay] addiu t6,zero,0x17  t6 = poison element code
+patch=1,EE,208DA2E8,extended,130E0005 // beq t8,t6,+5 → 008DA300  poison? → found
+patch=1,EE,208DA2EC,extended,2739FFFF // [delay] addiu t9,t9,-1    decrement slot counter
+patch=1,EE,208DA2F0,extended,5720FFFA // bnel t9,zero,-6 → 008DA2DC  more slots? loop (delay squashed if done)
+patch=1,EE,208DA2F4,extended,24630008 // [delay] addiu v1,v1,0x8   advance to next slot
+
+// ---- NOT FOUND: return to fire scanner (which will also find nothing for disease/poison)
+patch=1,EE,208DA2F8,extended,0807A608 // j 001E9820                no disease/poison buff → skip
+patch=1,EE,208DA2FC,extended,00000000 // nop
+
+// ---- FOUND (008DA300): slot matched — check timer to distinguish buff from gem
+patch=1,EE,208DA300,extended,94780006 // lhu t8,0x6(v1)            t8 = cccc (timer; hi16 of word1)
+patch=1,EE,208DA304,extended,1300001A // beq t8,zero,+26 → 008DA370  timer==0 → gem → skip
+patch=1,EE,208DA308,extended,00000000 // nop
+
+// ---- LOAD MIN / MAX DAMAGE
+patch=1,EE,208DA30C,extended,94680002 // lhu t0,0x2(v1)            t0 = aaaa (min_damage)
+patch=1,EE,208DA310,extended,94650004 // lhu a1,0x4(v1)            a1 = dddd (max_damage)
+
+// ---- LCG RNG STEP: new_state = old_state * 0x0019660D + 0x3C6EF35F
+patch=1,EE,208DA314,extended,3C010040 // lui at,0x0040             at = 0x00400000
+patch=1,EE,208DA318,extended,24214464 // addiu at,at,0x4464        at = 0x00404464 (RNG state addr)
+patch=1,EE,208DA31C,extended,8C2A0000 // lw t2,0x0(at)             t2 = old RNG state
+patch=1,EE,208DA320,extended,3C0B0019 // lui t3,0x0019
+patch=1,EE,208DA324,extended,356B660D // ori t3,t3,0x660D           t3 = 0x0019660D (multiplier)
+patch=1,EE,208DA328,extended,014B0018 // mult t2,t3                 HI:LO = old_state * mult
+patch=1,EE,208DA32C,extended,00005012 // mflo t2                    t2 = low 32 bits of product
+patch=1,EE,208DA330,extended,3C0B3C6E // lui t3,0x3C6E
+patch=1,EE,208DA334,extended,356BF35F // ori t3,t3,0xF35F           t3 = 0x3C6EF35F (addend)
+patch=1,EE,208DA338,extended,016A5021 // addu t2,t3,t2              t2 = new RNG state
+patch=1,EE,208DA33C,extended,AC2A0000 // sw t2,0x0(at)              store new RNG state
+patch=1,EE,208DA340,extended,000A5402 // srl t2,t2,0x10             t2 = new_state >> 16 (RNG sample)
+
+// ---- COMPUTE DAMAGE: min + (rng_sample mod range)
+patch=1,EE,208DA344,extended,00A82823 // subu a1,a1,t0              a1 = max - min
+patch=1,EE,208DA348,extended,24A50001 // addiu a1,a1,0x1            a1 = range (max-min+1)
+patch=1,EE,208DA34C,extended,0145001A // div t2,a1                  LO = quotient, HI = remainder
+patch=1,EE,208DA350,extended,00005010 // mfhi t2                    t2 = rng_sample mod range
+patch=1,EE,208DA354,extended,010A5021 // addu t2,t0,t2              t2 = min + remainder
+
+// ---- APPLY RESISTANCE: net = damage * (1 - resistance); add to f23
+patch=1,EE,208DA358,extended,448A0000 // mtc1 t2,f00                f00 = damage (int)
+patch=1,EE,208DA35C,extended,46800020 // cvt.s.w f00,f00            f00 = float(damage)
+patch=1,EE,208DA360,extended,C641005C // lwc1 f01,0x5C(s2)          f01 = resistance factor
+patch=1,EE,208DA364,extended,46010042 // mul.s f01,f00,f01          f01 = damage * resistance
+patch=1,EE,208DA368,extended,46010001 // sub.s f00,f00,f01          f00 = damage * (1 - resistance)
+patch=1,EE,208DA36C,extended,4600BDC0 // add.s f23,f23,f00          f23 += net elemental damage
+
+// ---- EXIT (008DA370): return to 001E9820 (fire scanner re-initializes its own regs)
+patch=1,EE,208DA370,extended,0807A608 // j 001E9820
+patch=1,EE,208DA374,extended,00000000 // nop
+// detour end: 008DA378
