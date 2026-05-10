@@ -110,6 +110,37 @@ The flat `+10` and `×1.7` base give a small early-game bump even with no armor 
 
 ---
 
+### 2H Weapon Damage Bonus
+`custom patches/SLUS-20973_4028A55F.WeaponRebalance.pnach` — first checkbox
+
+Two-handed melee weapons deal **+20% damage** across the board — physical and elemental. Bows and thrown weapons are unaffected.
+
+#### What gets the bonus
+- **Physical damage** — min and max are both scaled before the random roll and before crit
+- **Elemental damage from socket gems** — fire, cold, lightning sockets on the equipped weapon
+- **Elemental damage from spell enchants** — Fire Weapons, Cold Weapons, Lightning Weapons
+- **Disease Blade / Poison Weapon elemental** — if the Disease Blade On-Hit Fix is also enabled
+
+#### What does NOT get the bonus
+- 1H melee weapons
+- Bows, thrown weapons
+- Spells (use INT Scaling mod for those)
+
+#### Stacking with Weapon Enchant INT Scaling
+When both mods are active, elemental enchant damage stacks multiplicatively:
+`elemental = base × 1.2 × (1 + INT_bonus)`
+
+---
+
+### 1H Attack Speed Bonus
+`custom patches/SLUS-20973_4028A55F.WeaponRebalance.pnach` — second checkbox
+
+One-handed melee weapons swung without a shield or off-hand weapon attack **25% faster**. Stacks additively with Battle Cry and other speed buffs (same as one rank of Battle Cry 25%).
+
+Dual-wielding and shield users are unaffected — the bonus only applies when the off-hand slot is empty.
+
+---
+
 ## Installation
 
 1. Copy the desired `.pnach` file(s) to your PCSX2 **`patches/`** folder
@@ -123,13 +154,22 @@ The flat `+10` and `×1.7` base give a small early-game bump even with no armor 
 | File | Contents |
 |------|----------|
 | `SLUS-20973_4028A55F.INTScaling.pnach` | INT Scaling + Shield Bash Defense Scaling (two checkboxes) |
-| `SLUS-20973_4028A55F.WeaponEnchantINTScaling.pnach` | Weapon Enchant INT Scaling (one checkbox) |
+| `SLUS-20973_4028A55F.WeaponEnchantINTScaling.pnach` | Weapon Enchant INT Scaling + Disease Blade On-Hit Fix (two checkboxes) |
+| `SLUS-20973_4028A55F.WeaponRebalance.pnach` | 2H Damage Bonus + 1H Attack Speed Bonus (two checkboxes) |
 
-`INTScaling.pnach` has two independently toggleable sections:
+`INTScaling.pnach` sections:
 - **INT Scaling** — spell damage scales with INT (standalone)
 - **Shield Bash Defense Scaling** — Shield Bash scales with armor (requires INT Scaling also enabled)
 
-All three mods are fully independent and can be mixed freely.
+`WeaponEnchantINTScaling.pnach` sections:
+- **Weapon Enchant INT Scaling** — Fire/Cold/Lightning Weapons elemental scales with INT (standalone)
+- **Disease Blade On-Hit Fix** — fixes Disease Blade and Poison Weapon dealing no elemental damage (standalone)
+
+`WeaponRebalance.pnach` sections:
+- **2H Damage Bonus** — +20% physical and elemental damage for 2H weapons (standalone)
+- **1H Attack Speed Bonus** — +25% attack speed for unshielded 1H weapons (standalone)
+
+All mods are fully independent and can be mixed freely.
 
 ---
 
