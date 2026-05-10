@@ -1,6 +1,6 @@
 gametitle=Champions: Return to Arms * NTSC-U * SLUS-20973 * 4028A55F
 [Weapon Enchant INT Scaling]
-author=mysaltyspace (made by Claude code)
+author=mysaltyspace created with Claude code
 description=Elemental damage from Fire/Cold/Lightning Weapons spells scales with INT. Same tiered formula as INTScaling: 0.5%/pt to 100, 0.4%/pt to 200, 0.3%/pt to 300, 0.2%/pt beyond. Socketed gem elemental unaffected. Compatible with INTScaling patch (enable independently). Disease Blade on-hit fix available as second section (enable independently).
 
 // ============================================================
@@ -724,7 +724,7 @@ patch=1,EE,208DA2C4,extended,00000000 // nop
 // SECTION 2: DISEASE BLADE / POISON WEAPON ON-HIT FIX
 // ============================================================
 [Disease Blade On-Hit Fix]
-author=mysaltyspace (made by Claude code)
+author=mysaltyspace created with Claude code
 description=Fixes Disease Blade (Shadow Knight) and Poison Weapon (Shaman) dealing no on-hit elemental damage. Two-part fix: (1) NOP at 001E82A0 lets disease/poison pass z_un_001e8230's early-exit gate. (2) Hook at 001E9818 adds a scanner+damage-computation detour at 008DA2C8 for both element codes (0x0026 disease, 0x0017 poison) using the same LCG RNG and resistance formula as the Fire/Cold/Lightning handlers. Can be enabled without Weapon Enchant INT Scaling.
 
 // ============================================================

@@ -1,0 +1,341 @@
+gametitle=Champions: Return to Arms * NTSC-U * SLUS-20973 * 4028A55F
+[2H Weapon Damage Bonus]
+author=mysaltyspace created with Claude code
+description=2H melee weapons deal +20% physical and elemental (Fire/Cold/Lightning/Disease/Poison) damage. Physical: pre-crit min/max and weapon damage parameter scaling. Elemental: scales f0/f20 before INT scaling; chains with WeaponEnchantINTScaling when both loaded. Disease/Poison elemental requires DiseasePoisonFix (bundled in WeaponEnchantINTScaling). Bows and throwing weapons unaffected. Stacks with INTScaling.
+
+// ============================================================
+// HOW THIS WORKS
+// ============================================================
+// PHYSICAL (hook at 001B6FD8):
+//   2H guards via s1 equip slots (same as before).
+//   Scales v0, v1 (staged min/max), and a3 lo32 (weapon damage param) by 1.2.
+//   Writes 2H flag byte to 008DA740: 1 if 2H confirmed, 0 otherwise.
+//   Cold-boot safe — no persistent struct fields modified.
+//
+// ELEMENTAL FIRE/COLD/LIGHTNING (hooks at 001E9928 / 001E9AD8 / 001E9F50):
+//   WeaponRebalance hooks the same addresses as WeaponEnchantINTScaling.
+//   Since "WeaponRebalance" sorts after "WeaponEnchantINTScaling", these
+//   patches overwrite WeaponEnchantINTScaling's hooks when both are loaded.
+//   Each detour:
+//     1. Reads flag byte from 008DA740.
+//     2. If 2H: multiplies elemental register (f0 or f20) by 1.2.
+//     3. Checks if WeaponEnchantINTScaling's detour is present (reads the
+//        first word of its detour — 0 if absent, 27BDFFE0 if loaded).
+//     4. If loaded: chains to WeaponEnchantINTScaling's detour which handles
+//        INT scaling, add.s, and original bne/jal replication.
+//        Effect: elemental = base × 1.2 × (1 + INT_bonus). Both stack.
+//     5. If not loaded: replicates original bne/jal behavior directly.
+//
+// ELEMENTAL DISEASE/POISON (sub-detour hooks DiseasePoisonFix code at 008DA4C8):
+//   The DiseasePoisonFix INT scaling block computes: f0 = net_damage × (1+INT).
+//   WeaponRebalance patches the mul.s at 008DA4C8 → sub-detour at 008DA620.
+//   Sub-detour: executes displaced mul.s, optionally scales f0 by 1.2 if flag=1,
+//   executes displaced add.s f23,f23,f0, returns to 008DA4D0.
+//   Harmless if DiseasePoisonFix is not loaded (nobody reaches 008DA4C8).
+//
+// FLAG BYTE at 008DA740:
+//   Written every physical hit. Elemental hooks fire in same hit event.
+//   Single-player correct; multiplayer: last physical hit wins (acceptable).
+//
+// DETOUR MEMORY LAYOUT (within previously-free 008DA58C–008DA741):
+//   008DA58C–008DA61C  Physical hit detour           (37 words / 148 bytes)
+//   008DA620–008DA64C  Disease/Poison 2H sub-detour  (11 words /  44 bytes)
+//   008DA650–008DA69C  Fire 2H detour                (20 words /  80 bytes)
+//   008DA6A0–008DA6EC  Cold 2H detour                (19 words /  76 bytes)
+//   008DA6F0–008DA73C  Lightning 2H detour           (19 words /  76 bytes)
+//   008DA740           2H flag byte (1 = 2H melee, 0 = not)
+//   008DA741–?         Free
+//
+// REGISTER USE (elemental detours):
+//   at, t9: clobbered (assembler temp and caller-saved — safe at hook points)
+//   f10: clobbered (caller-saved FPU temp)
+//   f0 / f20: conditionally scaled by 1.2; WeaponEnchantINTScaling sees scaled value
+// ============================================================
+
+// ============================================================
+// HOOK PATCHES
+// ============================================================
+
+// Physical hit hook
+patch=1,EE,201B6FD8,extended,08236963  // j 008DA58C            (was: AFA20000 sw v0,0x0(sp))
+patch=1,EE,201B6FDC,extended,00000000  // nop                    (was: 0C0F36C2 jal z_un_003cdb08)
+
+// Fire Weapons elemental hook (overrides WeaponEnchantINTScaling when both loaded)
+patch=1,EE,201E9928,extended,08236994  // j 008DA650             (was: 14C00009 bne or 08236700 WEI)
+patch=1,EE,201E992C,extended,00000000  // nop                    (was: 4600BDC0 add.s or 00000000)
+
+// Cold Weapons elemental hook
+patch=1,EE,201E9AD8,extended,082369A8  // j 008DA6A0             (was: 0C08510A jal or 08236780 WEI)
+patch=1,EE,201E9ADC,extended,00000000  // nop
+
+// Lightning Weapons elemental hook
+patch=1,EE,201E9F50,extended,082369BC  // j 008DA6F0             (was: 0C05CD97 jal or 08236800 WEI)
+patch=1,EE,201E9F54,extended,00000000  // nop
+
+// Disease/Poison: patch inside DiseasePoisonFix INT scaling block
+// 008DA4C8 = mul.s f0,f3,f0 (net_damage × INT_multiplier), 008DA4CC = add.s f23,f23,f0
+patch=1,EE,208DA4C8,extended,08236988  // j 008DA620             (was: 46001802 mul.s f0,f3,f0)
+patch=1,EE,208DA4CC,extended,00000000  // nop                    (was: 4600BDC0 add.s f23,f23,f0)
+
+// ============================================================
+// PHYSICAL HIT DETOUR at 008DA58C  (37 words / 148 bytes, ends 008DA61C)
+//
+// Entry state:
+//   s1 = player base struct (004D8AF0 + player_index × 4C30)
+//   v0 = pre-crit min damage, v1 = pre-crit max damage
+//   a0=6, a1=1, a2 = weapon struct ptr, a3 lo32 = 0x23 (weapon damage param)
+//   sp = stack pointer
+//
+// Guard 1: s1+0x43F8 non-null  → 2H/bow/throwing weapon in hand
+// Guard 2: s1+0x4434 == s1+0x43F8 → in-hand is 2H melee (not bow: bow uses +0x4438)
+// Both pass → 2H confirmed; scale v0, v1, a3 lo32 by 1.2; write flag=1
+// Either fails → no scale; write flag=0
+// Both paths fall through to displaced sw/jal/return
+// ============================================================
+
+patch=1,EE,208DA58C,extended,8E2843F8  // lw t0,0x43F8(s1)         guard 1: in-hand slot
+patch=1,EE,208DA590,extended,1100001B  // beq t0,zero,+27 → 008DA600 (no_bonus)
+patch=1,EE,208DA594,extended,00000000  // nop
+patch=1,EE,208DA598,extended,8E294434  // lw t1,0x4434(s1)         guard 2: 2H melee equipped
+patch=1,EE,208DA59C,extended,15090018  // bne t0,t1,+24 → 008DA600 (no_bonus)
+patch=1,EE,208DA5A0,extended,00000000  // nop
+
+patch=1,EE,208DA5A4,extended,3C013F99  // lui at,0x3F99             load 1.2f into f8
+patch=1,EE,208DA5A8,extended,3421999A  // ori at,at,0x999A
+patch=1,EE,208DA5AC,extended,44814000  // mtc1 at,f8                f8 = 1.2f (0x3F99999A)
+
+patch=1,EE,208DA5B0,extended,44823000  // mtc1 v0,f6                scale v0 (min damage)
+patch=1,EE,208DA5B4,extended,468031A0  // cvt.s.w f6,f6
+patch=1,EE,208DA5B8,extended,46083182  // mul.s f6,f6,f8
+patch=1,EE,208DA5BC,extended,460031A4  // cvt.w.s f6,f6
+patch=1,EE,208DA5C0,extended,44023000  // mfc1 v0,f6
+
+patch=1,EE,208DA5C4,extended,44833000  // mtc1 v1,f6                scale v1 (max damage)
+patch=1,EE,208DA5C8,extended,468031A0  // cvt.s.w f6,f6
+patch=1,EE,208DA5CC,extended,46083182  // mul.s f6,f6,f8
+patch=1,EE,208DA5D0,extended,460031A4  // cvt.w.s f6,f6
+patch=1,EE,208DA5D4,extended,44033000  // mfc1 v1,f6
+
+patch=1,EE,208DA5D8,extended,44873000  // mtc1 a3,f6                scale a3 lo32 (weapon damage param)
+patch=1,EE,208DA5DC,extended,468031A0  // cvt.s.w f6,f6
+patch=1,EE,208DA5E0,extended,46083182  // mul.s f6,f6,f8
+patch=1,EE,208DA5E4,extended,460031A4  // cvt.w.s f6,f6
+patch=1,EE,208DA5E8,extended,44073000  // mfc1 a3,f6
+
+patch=1,EE,208DA5EC,extended,3C01008E  // lui at,0x008E             write flag=1 to 008DA740
+patch=1,EE,208DA5F0,extended,24190001  // addiu t9,zero,1
+patch=1,EE,208DA5F4,extended,A039A740  // sb t9,0xA740(at)          at=008E0000; 008E0000-5900h=008DA740
+patch=1,EE,208DA5F8,extended,08236982  // j 008DA608                jump past no_bonus to shared_code
+patch=1,EE,208DA5FC,extended,00000000  // nop
+
+patch=1,EE,208DA600,extended,3C01008E  // lui at,0x008E             no_bonus: write flag=0
+patch=1,EE,208DA604,extended,A020A740  // sb zero,0xA740(at)        clear 2H flag
+
+patch=1,EE,208DA608,extended,AFA20000  // sw v0,0x0(sp)             displaced from 001B6FD8
+patch=1,EE,208DA60C,extended,AFA30004  // sw v1,0x4(sp)             displaced delay slot (from 001B6FE0)
+patch=1,EE,208DA610,extended,0C0F36C2  // jal z_un_003cdb08         displaced from 001B6FDC
+patch=1,EE,208DA614,extended,00000000  // nop
+patch=1,EE,208DA618,extended,0806DBF9  // j 001B6FE4                return past original jal+delay
+patch=1,EE,208DA61C,extended,00000000  // nop
+
+// ============================================================
+// DISEASE/POISON 2H SUB-DETOUR at 008DA620  (11 words / 44 bytes, ends 008DA64C)
+//
+// Hooks 008DA4C8 (inside DiseasePoisonFix INT scaling block).
+// At entry: f3 = net_damage (saved on stack), f0 = (1.0 + INT_bonus).
+// mul.s f0,f3,f0 → f0 = net_damage × (1+INT_bonus).
+// If 2H flag set: mul.s f0,f0,f10 → f0 × 1.2.
+// add.s f23,f23,f0 (displaced from 008DA4CC).
+// Return to 008DA4D0 (mtc1 zero,f00 zeroes f0 then stack restore + j 001E9820).
+// ============================================================
+patch=1,EE,208DA620,extended,46001802  // mul.s f0,f3,f0            displaced from 008DA4C8
+patch=1,EE,208DA624,extended,3C01008E  // lui at,0x008E
+patch=1,EE,208DA628,extended,9039A740  // lbu t9,0xA740(at)         t9 = 2H flag (0 or 1)
+patch=1,EE,208DA62C,extended,13200005  // beq t9,zero,+5 → 008DA644 (no_scale_dp)
+patch=1,EE,208DA630,extended,00000000  // nop
+patch=1,EE,208DA634,extended,3C013F99  // lui at,0x3F99              f10 = 1.2f
+patch=1,EE,208DA638,extended,3421999A  // ori at,at,0x999A
+patch=1,EE,208DA63C,extended,44815000  // mtc1 at,f10
+patch=1,EE,208DA640,extended,460A0002  // mul.s f0,f0,f10            f0 *= 1.2
+// no_scale_dp:
+patch=1,EE,208DA644,extended,4600BDC0  // add.s f23,f23,f0          displaced from 008DA4CC
+patch=1,EE,208DA648,extended,08236934  // j 008DA4D0                return to DiseasePoisonFix
+patch=1,EE,208DA64C,extended,00000000  // nop
+
+// ============================================================
+// FIRE WEAPONS 2H DETOUR at 008DA650  (20 words / 80 bytes, ends 008DA69C)
+//
+// Hook: 001E9928 (was: bne a2,zero,001E9950 / delay: add.s f23,f23,f0)
+// At entry: f0 = fire enchant elemental damage.
+//
+// 1. If 2H flag: f0 *= 1.2
+// 2. Check 008D9C00 (WeaponEnchantINTScaling fire detour start):
+//      non-zero → chain there (INT scaling + bne replication + return 001E9930/001E9950)
+//      zero     → replicate original bne a2,zero,001E9950 + add.s f23,f23,f0
+// ============================================================
+patch=1,EE,208DA650,extended,3C01008E  // lui at,0x008E
+patch=1,EE,208DA654,extended,9039A740  // lbu t9,0xA740(at)         t9 = 2H flag
+patch=1,EE,208DA658,extended,13200005  // beq t9,zero,+5 → 008DA670 (no_scale_f)
+patch=1,EE,208DA65C,extended,00000000  // nop
+patch=1,EE,208DA660,extended,3C013F99  // lui at,0x3F99              f10 = 1.2f
+patch=1,EE,208DA664,extended,3421999A  // ori at,at,0x999A
+patch=1,EE,208DA668,extended,44815000  // mtc1 at,f10
+patch=1,EE,208DA66C,extended,460A0002  // mul.s f0,f0,f10            f0 *= 1.2
+// no_scale_f:
+patch=1,EE,208DA670,extended,3C01008E  // lui at,0x008E
+patch=1,EE,208DA674,extended,8C399C00  // lw t9,0x9C00(at) → 008D9C00 (WEI fire detour start)
+patch=1,EE,208DA678,extended,11200003  // beq t9,zero,+3 → 008DA688 (not_loaded_f)
+patch=1,EE,208DA67C,extended,00000000  // nop
+patch=1,EE,208DA680,extended,08236700  // j 008D9C00                chain to WeaponEnchantINTScaling fire
+patch=1,EE,208DA684,extended,00000000  // nop
+// not_loaded_f: replicate original bne a2,zero,001E9950 + delay add.s f23,f23,f0
+patch=1,EE,208DA688,extended,14C00003  // bne a2,zero,+3 → 008DA698 (take_f)
+patch=1,EE,208DA68C,extended,4600BDC0  // add.s f23,f23,f0          delay slot — always executes
+patch=1,EE,208DA690,extended,0807A64C  // j 001E9930                fall-through (a2==0)
+patch=1,EE,208DA694,extended,00000000  // nop
+// take_f:
+patch=1,EE,208DA698,extended,0807A654  // j 001E9950                branch taken (a2!=0)
+patch=1,EE,208DA69C,extended,00000000  // nop
+
+// ============================================================
+// COLD WEAPONS 2H DETOUR at 008DA6A0  (19 words / 76 bytes, ends 008DA6EC)
+//
+// Hook: 001E9AD8 (was: jal z_un_00214428 / delay: add.s f23,f23,f20)
+// At entry: f20 = cold enchant elemental damage.
+//
+// 1. If 2H flag: f20 *= 1.2
+// 2. Check 008D9E00 (WeaponEnchantINTScaling cold detour start):
+//      non-zero → chain (INT scaling + jal replication + return 001E9AE0)
+//      zero     → replicate jal z_un_00214428 via jalr; add.s f23,f23,f20 in delay
+// ============================================================
+patch=1,EE,208DA6A0,extended,3C01008E  // lui at,0x008E
+patch=1,EE,208DA6A4,extended,9039A740  // lbu t9,0xA740(at)         t9 = 2H flag
+patch=1,EE,208DA6A8,extended,13200005  // beq t9,zero,+5 → 008DA6C0 (no_scale_c)
+patch=1,EE,208DA6AC,extended,00000000  // nop
+patch=1,EE,208DA6B0,extended,3C013F99  // lui at,0x3F99              f10 = 1.2f
+patch=1,EE,208DA6B4,extended,3421999A  // ori at,at,0x999A
+patch=1,EE,208DA6B8,extended,44815000  // mtc1 at,f10
+patch=1,EE,208DA6BC,extended,460AA502  // mul.s f20,f20,f10          f20 *= 1.2
+// no_scale_c:
+patch=1,EE,208DA6C0,extended,3C01008E  // lui at,0x008E
+patch=1,EE,208DA6C4,extended,8C399E00  // lw t9,0x9E00(at) → 008D9E00 (WEI cold detour start)
+patch=1,EE,208DA6C8,extended,11200003  // beq t9,zero,+3 → 008DA6D8 (not_loaded_c)
+patch=1,EE,208DA6CC,extended,00000000  // nop
+patch=1,EE,208DA6D0,extended,08236780  // j 008D9E00                chain to WeaponEnchantINTScaling cold
+patch=1,EE,208DA6D4,extended,00000000  // nop
+// not_loaded_c: replicate jal z_un_00214428 (0x00214428) + add.s f23,f23,f20 + return 001E9AE0
+patch=1,EE,208DA6D8,extended,3C010021  // lui at,0x0021              load z_un_00214428 addr
+patch=1,EE,208DA6DC,extended,34214428  // ori at,at,0x4428
+patch=1,EE,208DA6E0,extended,0020F809  // jalr at                    call; ra→008DA6E8
+patch=1,EE,208DA6E4,extended,4614BDC0  // add.s f23,f23,f20          delay slot of jalr (always executes)
+// z_un_00214428 returns to ra = 008DA6E8:
+patch=1,EE,208DA6E8,extended,0807A6B8  // j 001E9AE0                 return to game
+patch=1,EE,208DA6EC,extended,00000000  // nop
+
+// ============================================================
+// LIGHTNING WEAPONS 2H DETOUR at 008DA6F0  (19 words / 76 bytes, ends 008DA73C)
+//
+// Hook: 001E9F50 (was: jal z_un_0017365c / delay: add.s f23,f23,f0)
+// At entry: f0 = lightning enchant elemental damage.
+//
+// 1. If 2H flag: f0 *= 1.2
+// 2. Check 008DA000 (WeaponEnchantINTScaling lightning detour start):
+//      non-zero → chain (INT scaling + jal replication + return 001E9F58)
+//      zero     → replicate jal z_un_0017365c via jalr; add.s f23,f23,f0 in delay
+// ============================================================
+patch=1,EE,208DA6F0,extended,3C01008E  // lui at,0x008E
+patch=1,EE,208DA6F4,extended,9039A740  // lbu t9,0xA740(at)         t9 = 2H flag
+patch=1,EE,208DA6F8,extended,13200005  // beq t9,zero,+5 → 008DA710 (no_scale_l)
+patch=1,EE,208DA6FC,extended,00000000  // nop
+patch=1,EE,208DA700,extended,3C013F99  // lui at,0x3F99              f10 = 1.2f
+patch=1,EE,208DA704,extended,3421999A  // ori at,at,0x999A
+patch=1,EE,208DA708,extended,44815000  // mtc1 at,f10
+patch=1,EE,208DA70C,extended,460A0002  // mul.s f0,f0,f10            f0 *= 1.2
+// no_scale_l:
+patch=1,EE,208DA710,extended,3C01008E  // lui at,0x008E
+patch=1,EE,208DA714,extended,8C39A000  // lw t9,0xA000(at) → 008DA000 (WEI lightning detour start)
+patch=1,EE,208DA718,extended,11200003  // beq t9,zero,+3 → 008DA728 (not_loaded_l)
+patch=1,EE,208DA71C,extended,00000000  // nop
+patch=1,EE,208DA720,extended,08236800  // j 008DA000                chain to WeaponEnchantINTScaling lightning
+patch=1,EE,208DA724,extended,00000000  // nop
+// not_loaded_l: replicate jal z_un_0017365c (0x0017365C) + add.s f23,f23,f0 + return 001E9F58
+patch=1,EE,208DA728,extended,3C010017  // lui at,0x0017              load z_un_0017365C addr
+patch=1,EE,208DA72C,extended,3421365C  // ori at,at,0x365C
+patch=1,EE,208DA730,extended,0020F809  // jalr at                    call; ra→008DA738
+patch=1,EE,208DA734,extended,4600BDC0  // add.s f23,f23,f0           delay slot of jalr (always executes)
+// z_un_0017365c returns to ra = 008DA738:
+patch=1,EE,208DA738,extended,0807A7D6  // j 001E9F58                 return to game
+patch=1,EE,208DA73C,extended,00000000  // nop
+
+// Flag byte at 008DA740 (EE RAM, zero-initialized by PCSX2 at boot).
+// 0x01 = most recent physical hit was with 2H melee weapon in hand.
+// 0x00 = not 2H (1H, bow, throwing, or no weapon).
+
+[1H Attack Speed Bonus]
+author=mysaltyspace created with Claude code
+description=+25% attack speed for 1H melee weapons held without a shield or off-hand weapon. Hooks f24 speed accumulator before it is applied as a divisor to attack intervals. Additive with Misty Globe sockets and Battle Cry.
+
+// ============================================================
+// HOW THIS WORKS
+// ============================================================
+// The stat-update function (~001A9FD0) accumulates an attack speed
+// multiplier into f24.  Verified values at hook (001AA174):
+//   no socket:      f24 = 1.00
+//   Misty Globe t2: f24 = 1.09  (+0.09 = 2 × 0.045)
+//   Misty Globe t4: f24 = 1.18  (+0.18 = 4 × 0.045)
+//   Battle Cry 25%: f24 = 1.25  (+0.25, confirms 1:1 mapping)
+//   Battle Cry 37%: f24 = 1.37  (additive: t4 + BC37 = 1.55 ✓)
+//
+// After accumulation, at 001AA170 the JAL to z_un_001b9520 passes
+// f24 via f12 (set in delay slot); f24 is then used as a divisor
+// in multiple div.s operations to shorten attack intervals.
+//
+// Hook at 001AA170 (JAL → j detour).  Delay slot at 001AA174
+// (mov.s f12,f24) still fires before the jump — stale f12 is
+// corrected inside the detour after f24 is modified.
+//
+// Detour conditions (all must pass for bonus):
+//   Guard 1: player_base+0x43F0 non-null → 1H weapon is in hand
+//   Guard 2: player_base+0x43F4 == 0 → no dual-wield weapon in hand
+//   Guard 3: player_base+0x43FC == 0 → no shield equipped
+//
+// Slot occupancy is the authoritative discriminant (weapon type halfword
+// unreliable — e.g. "battle worn sword" = 0x8004 yet in 1H slot).
+//
+// Hook site:  001AA170  (was: 0C06E548 jal z_un_001b9520)
+//             001AA174  delay slot mov.s f12,f24 — left unchanged
+// Detour:     008DA544 – 008DA584  (17 words / 68 bytes)
+// ============================================================
+
+// ---- HOOK
+patch=1,EE,201AA170,extended,08236951  // j 0x008DA544          (was: 0C06E548 jal z_un_001b9520)
+
+// ---- DETOUR at 008DA544
+// Entry: s3 = player_base, f24 = accumulated speed multiplier, f12 = f24 (stale)
+
+// Guard 1: 1H weapon in-hand slot non-null (player_base+0x43F0)
+patch=1,EE,208DA544,extended,8E7843F0  // lw t8,0x43F0(s3)
+patch=1,EE,208DA548,extended,1300000A  // beq t8,zero,+10 → 008DA574 (no_bonus)
+patch=1,EE,208DA54C,extended,00000000  // nop
+
+// Guard 2: no dual-wield weapon in hand (player_base+0x43F4)
+patch=1,EE,208DA550,extended,8E7843F4  // lw t8,0x43F4(s3)
+patch=1,EE,208DA554,extended,17000007  // bne t8,zero,+7 → 008DA574 (no_bonus)
+patch=1,EE,208DA558,extended,00000000  // nop
+
+// Guard 3: no shield equipped (player_base+0x43FC)
+patch=1,EE,208DA55C,extended,8E7843FC  // lw t8,0x43FC(s3)
+patch=1,EE,208DA560,extended,17000004  // bne t8,zero,+4 → 008DA574 (no_bonus)
+patch=1,EE,208DA564,extended,00000000  // nop
+
+// 1H confirmed: add 0.25 to f24 (+25% attack speed)
+patch=1,EE,208DA568,extended,3C013E80  // lui at,0x3E80           at = 0x3E800000 = 0.25f
+patch=1,EE,208DA56C,extended,44815000  // mtc1 at,f10             f10 = 0.25f
+patch=1,EE,208DA570,extended,460AC600  // add.s f24,f24,f10       f24 += 0.25
+
+// no_bonus: update f12 with (possibly modified) f24, execute displaced jal, return
+patch=1,EE,208DA574,extended,4600C306  // mov.s f12,f24           correct stale f12
+patch=1,EE,208DA578,extended,0C06E548  // jal z_un_001b9520       displaced JAL
+patch=1,EE,208DA57C,extended,00000000  // nop
+patch=1,EE,208DA580,extended,0806A85E  // j 0x001AA178            return past original JAL+delay
+patch=1,EE,208DA584,extended,00000000  // nop
