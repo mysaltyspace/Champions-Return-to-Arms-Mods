@@ -9,7 +9,7 @@ PCSX2 `.pnach` patch mods for **Champions: Return to Arms** (PS2, NTSC-U).
 ## Mods
 
 ### INT Scaling
-`custom patches/SLUS-20973_4028A55F.INTScaling.pnach`
+`custom patches/SLUS-20973_4028A55F.SpellDamageScaling.pnach`
 
 Makes spell damage scale with the caster's **Intelligence (INT)** stat using diminishing returns. Works in 1–4 player sessions — each player's spells scale off their own INT.
 
@@ -35,14 +35,14 @@ Tiers: **+0.5%/pt** from 20–100 · **+0.4%/pt** from 100–200 · **+0.3%/pt**
 - Shield Bash — has its own optional armor scaling mod (see below)
 - Weapon enchantment elemental damage — has its own separate mod (see below)
 - Socketed gem elemental damage (unaffected by design)
-- Disease/Poison Weapons elemental damage (base game bug — deals no elemental damage)
+- Disease/Poison Weapons elemental damage (base game bug — deals no elemental damage; fixed by the **Disease Blade/Poison Weapons Fix** in `SLUS-20973_4028A55F.WeaponEnchantFixAndScaling.pnach`)
 
 > **Note:** This patch is a work in progress. If you find a damage type that is incorrectly scaled or not scaled, please open an issue.
 
 ---
 
 ### Weapon Enchant INT Scaling
-`custom patches/SLUS-20973_4028A55F.WeaponEnchantINTScaling.pnach`
+`custom patches/SLUS-20973_4028A55F.WeaponEnchantFixAndScaling.pnach`
 
 Makes the elemental damage bonus from **Fire Weapons**, **Cold Weapons**, and **Lightning Weapons** spells scale with **Intelligence (INT)**. Uses the same tiered diminishing-returns formula as the INT Scaling mod. Works independently — enable with or without INT Scaling.
 
@@ -53,7 +53,7 @@ Makes the elemental damage bonus from **Fire Weapons**, **Cold Weapons**, and **
 
 #### What does NOT scale
 - Socketed gem elemental damage (intentionally excluded — different damage source)
-- Disease/Poison Weapons — see Disease Blade On-Hit Fix section below
+- Disease/Poison Weapons — see Disease Blade/Poison Weapons Fix section below
 - Base weapon physical damage
 
 #### How it works
@@ -75,29 +75,19 @@ Three hook points intercept the game's elemental-merge instruction for each ench
 
 ---
 
-### Poison Weapon / Disease Blade Ally Buff Timer Fix
-`custom patches/SLUS-20973_4028A55F.WeaponEnchantINTScaling.pnach` — third checkbox
+### Disease Blade/Poison Weapons Fix
+`custom patches/SLUS-20973_4028A55F.WeaponEnchantFixAndScaling.pnach` — second checkbox
 
-Fixes the **ally AoE version** of Poison Weapon and Disease Blade flickering on and off while standing near the caster. Two root causes in the base game:
+Fixes two bugs affecting **Disease Blade** (Shadow Knight) and **Poison Weapon** (Shaman):
 
-1. The buff-application function only runs once every 30 frames (0.5s throttle), creating a guaranteed gap between buff expiry and re-application.
-2. The ally's buff timer is written from a weapon-stat-derived value (~52 ticks), which expires before the next re-application cycle.
+**On-hit damage fix** — both spells deal zero elemental damage in the base game. A flag in the player entity struct has bit 17 set for disease/poison hits, causing `z_un_001e8230` (the universal weapon-enchant elemental handler) to exit early before computing any damage. This patch NOPs that early-exit branch (`001E82A0`) and adds a damage-computation hook (`001E9818`) using the same LCG RNG and resistance formula as the Fire/Cold/Lightning handlers.
 
-This patch removes the 30-frame throttle so the function runs every frame, and sets the ally timer to 60 ticks (~1s). The buff is now stable while the ally is in range and drops within ~1s when the ally moves out of range or the spell ends.
-
-Standalone — can be enabled without Weapon Enchant INT Scaling or Disease Blade On-Hit Fix.
-
----
-
-### Disease Blade On-Hit Fix
-`custom patches/SLUS-20973_4028A55F.WeaponEnchantINTScaling.pnach` — second checkbox
-
-Fixes **Disease Blade** (Shadow Knight) and **Poison Weapon** (Shaman) dealing no on-hit elemental damage. The base game has a bug in `z_un_001e8230` (the universal weapon-enchant elemental handler): a flag in the player entity struct has bit 17 set for disease/poison hits, causing the function to exit early before computing any damage. This patch NOPs that early-exit branch (`001E82A0`), allowing disease and poison hits to proceed through the same elemental damage path used by fire, cold, and lightning.
+**Ally buff timer fix** — the ally AoE version of both spells flickers on and off while allies stand near the caster. Two root causes: (1) the buff-application function only runs once every 30 frames, creating a 0.5s re-application gap; (2) the ally buff timer is written from a weapon-stat-derived value (~52 ticks) that expires before the next re-application cycle. This patch removes the 30-frame throttle and sets the ally timer to 60 ticks (~1s). The buff is now stable while the ally is in range and drops within ~1s when they move out of range or the spell ends.
 
 ---
 
 ### Shield Bash Defense Scaling
-`custom patches/SLUS-20973_4028A55F.INTScaling.pnach` — second checkbox in PCSX2
+`custom patches/SLUS-20973_4028A55F.SpellDamageScaling.pnach` — second checkbox in PCSX2
 
 Makes **Shield Bash** damage scale with **total armor** (Cleric, Barbarian, Shadow Knight). Rewards armor-focused builds without making the ability overpowered at low gear levels.
 
@@ -133,7 +123,7 @@ Two-handed melee weapons deal **+20% damage** across the board — physical and 
 - **Physical damage** — min and max are both scaled before the random roll and before crit
 - **Elemental damage from socket gems** — fire, cold, lightning sockets on the equipped weapon
 - **Elemental damage from spell enchants** — Fire Weapons, Cold Weapons, Lightning Weapons
-- **Disease Blade / Poison Weapon elemental** — if the Disease Blade On-Hit Fix is also enabled
+- **Disease Blade / Poison Weapon elemental** — if the Disease Blade/Poison Weapons Fix is also enabled
 
 #### What does NOT get the bonus
 - 1H melee weapons
@@ -167,18 +157,17 @@ Dual-wielding and shield users are unaffected — the bonus only applies when th
 
 | File | Contents |
 |------|----------|
-| `SLUS-20973_4028A55F.INTScaling.pnach` | INT Scaling + Shield Bash Defense Scaling (two checkboxes) |
-| `SLUS-20973_4028A55F.WeaponEnchantINTScaling.pnach` | Weapon Enchant INT Scaling + Disease Blade On-Hit Fix + Ally Buff Timer Fix (three checkboxes) |
+| `SLUS-20973_4028A55F.SpellDamageScaling.pnach` | INT Scaling + Shield Bash Defense Scaling (two checkboxes) |
+| `SLUS-20973_4028A55F.WeaponEnchantFixAndScaling.pnach` | Weapon Enchant INT Scaling + Disease Blade/Poison Weapons Fix (two checkboxes) |
 | `SLUS-20973_4028A55F.WeaponRebalance.pnach` | 2H Damage Bonus + 1H Attack Speed Bonus (two checkboxes) |
 
-`INTScaling.pnach` sections:
+`SpellDamageScaling.pnach` sections:
 - **INT Scaling** — spell damage scales with INT (standalone)
 - **Shield Bash Defense Scaling** — Shield Bash scales with armor (requires INT Scaling also enabled)
 
-`WeaponEnchantINTScaling.pnach` sections:
+`WeaponEnchantFixAndScaling.pnach` sections:
 - **Weapon Enchant INT Scaling** — Fire/Cold/Lightning Weapons elemental scales with INT (standalone)
-- **Disease Blade On-Hit Fix** — fixes Disease Blade and Poison Weapon dealing no elemental damage (standalone)
-- **Poison Weapon Ally Buff Timer Fix** — fixes ally AoE buff flickering on/off near caster (standalone)
+- **Disease Blade/Poison Weapons Fix** — fixes on-hit elemental damage and ally buff flicker for Disease Blade and Poison Weapon (standalone)
 
 `WeaponRebalance.pnach` sections:
 - **2H Damage Bonus** — +20% physical and elemental damage for 2H weapons (standalone)

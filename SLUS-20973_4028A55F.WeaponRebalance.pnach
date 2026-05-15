@@ -1,7 +1,7 @@
 gametitle=Champions: Return to Arms * NTSC-U * SLUS-20973 * 4028A55F
 [2H Weapon Damage Bonus]
 author=mysaltyspace created with Claude code
-description=2H melee weapons deal +20% physical and elemental (Fire/Cold/Lightning/Disease/Poison) damage. Physical: pre-crit min/max and weapon damage parameter scaling. Elemental: scales f0/f20 before INT scaling; chains with WeaponEnchantFixAndScaling when both loaded. Disease/Poison elemental requires DiseasePoisonFix (bundled in WeaponEnchantFixAndScaling). Bows and throwing weapons unaffected. Stacks with INTScaling.
+description=2H melee weapons deal +20% physical and elemental (Fire/Cold/Lightning/Disease/Poison) damage. Physical: pre-crit min/max and weapon damage parameter scaling. Elemental: scales f0/f20 before INT scaling; chains with WeaponEnchantFixAndScaling when both loaded. Disease/Poison elemental requires DiseasePoisonFix (bundled in WeaponEnchantFixAndScaling). Bows and throwing weapons unaffected. Stacks with SpellDamageScaling.
 
 // ============================================================
 // HOW THIS WORKS

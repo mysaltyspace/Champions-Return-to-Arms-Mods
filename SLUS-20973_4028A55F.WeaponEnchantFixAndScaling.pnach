@@ -1,7 +1,7 @@
 gametitle=Champions: Return to Arms * NTSC-U * SLUS-20973 * 4028A55F
 [Weapon Enchant INT Scaling]
 author=mysaltyspace created with Claude code
-description=Elemental damage from Fire/Cold/Lightning Weapons spells scales with INT. Same tiered formula as INTScaling: 0.5%/pt to 100, 0.4%/pt to 200, 0.3%/pt to 300, 0.2%/pt beyond. Socketed gem elemental unaffected. Compatible with INTScaling patch (enable independently). Disease Blade on-hit fix available as second section (enable independently).
+description=Elemental damage from Fire/Cold/Lightning Weapons spells scales with INT. Same tiered formula as SpellDamageScaling: 0.5%/pt to 100, 0.4%/pt to 200, 0.3%/pt to 300, 0.2%/pt beyond. Socketed gem elemental unaffected. Compatible with SpellDamageScaling patch (enable independently). Disease Blade on-hit fix available as second section (enable independently).
 
 // ============================================================
 // HOW THIS WORKS
@@ -39,7 +39,7 @@ description=Elemental damage from Fire/Cold/Lightning Weapons spells scales with
 //                P1=004D8B84, P2=004DD7B4, P3=004E23E4, P4=004E7014
 //                player_index = (s4 − 0x006C88C0) / 0x0BB8
 //                fallback to P1 if player_index ≥ 4 or INT reads as 0 (SP quirk)
-// Free memory:   008D9C00 – 008DA2C8  (INTScaling.pnach ends at 008D9B44)
+// Free memory:   008D9C00 – 008DA2C8  (SpellDamageScaling.pnach ends at 008D9B44)
 // ============================================================
 
 // ============================================================
@@ -62,7 +62,7 @@ patch=1,EE,201E9F54,extended,00000000 // nop               (was: add.s f23,f23,f
 // FIRE WEAPONS DETOUR  at 008D9C00
 //
 // Enchant register: f0.  f0 is saved at entry so it can serve as the
-// bonus accumulator (same trick as INTScaling.pnach).  After the four
+// bonus accumulator (same trick as SpellDamageScaling.pnach).  After the four
 // tiers f0 = 1.0+bonus; original enchant is in f3 (loaded from stack),
 // so  mul.s f0,f3,f0  puts the scaled enchant back into f0.  Scaled
 // value is stored to sp+0x0C so the shared restore block works for
