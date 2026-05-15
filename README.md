@@ -150,8 +150,8 @@ Dual-wielding and shield users are unaffected — the bonus only applies when th
 1. Copy the desired `.pnach` file(s) to your PCSX2 **`patches/`** folder
    - Default location: `Documents/PCSX2/patches/`
    - Do **not** put them in the `cheats/` folder
-2. In PCSX2, enable patches: **System → Enable Patches**
-3. Boot the game — patches are active immediately on load
+2. In PCSX2, open **Game Properties → Patches** and check each patch you want enabled
+3. Do a fresh boot of the game
 
 ### Patch files
 
