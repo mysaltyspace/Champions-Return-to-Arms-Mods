@@ -993,3 +993,78 @@ patch=1,EE,208DA4D4,extended,27BD0008 // addiu sp,sp,8               restore sta
 patch=1,EE,208DA4D8,extended,0807A608 // j 001E9820
 patch=1,EE,208DA4DC,extended,00000000 // nop
 // INT scaling block end: 008DA4E0
+
+// ============================================================
+// SECTION 3: POISON WEAPON / DISEASE BLADE ALLY BUFF TIMER FIX
+// ============================================================
+[Poison Weapon Ally Buff Timer Fix]
+author=mysaltyspace created with Claude code
+description=Fixes Poison Weapon and Disease Blade AoE ally buffs flickering on and off while allies stand near the caster. Root cause: the buff-application function writes the ally cccc (slot timer) to a weapon-stat-derived value (~52 ticks) that is shorter than the re-application cycle. Fix: two patches redirect the ally cccc write to a fixed 121-tick register (t5), ensuring the timer never expires between refreshes. Out-of-range and spell-end expiry both work unchanged. Standalone — can be enabled without other sections.
+
+// ============================================================
+// HOW THIS WORKS
+// ============================================================
+// A buff-application function (around 0x003165xx) runs periodically while
+// Poison Weapon is active and allies are in range. For each in-range ally it
+// writes the Poison buff to that ally's weapon enchant slot:
+//   sh t4,   0x00(a0)  → bbbb = 0x0017 (Poison element code)
+//   sh t3,   0x00(v1)  → aaaa = weapon stat value (min damage)
+//   sh t1,  0x22(v0)   → dddd = round(t3 × 1.2)   (max damage)
+//   sh t1,  0x24(v0)   → cccc = round(t3 × 1.2)   (TIMER ← root cause)
+//                          ↑ delay slot of beq at 0x00316818
+//
+// t1 is computed from weapon stats via:
+//   mtc1/cvt.s.w t3→f00 → mul.s f01,f00,0.2 → add.s f01,f00,f01 → cvt.w.s/mfc1 → t1
+//   i.e.  t1 = round(t3 × 1.2)
+// For a typical weapon this produces t1 ≈ 52. Because the re-application
+// cycle is longer than 52 frames, cccc expires between refreshes → ally buff
+// briefly disappears → visible flicker.
+//
+// t5 is set just above the write section:
+//   addiu t5,zero,0x1F   at 0x003167CC   (t5 = 31, used for caster's own slot)
+// t5 is never read between 003167CC and 0031681C (the write section only
+// uses t1, t3, t4, t0, a0, a1, a2, v0, v1 — confirmed by full scan).
+//
+// FIX — three instructions:
+//   (1) 00316578: addiu v0,zero,0x1E (0x2402001E) → addiu v0,zero,0x01 (0x24020001)
+//       Changes the mod-30 throttle to mod-1 (always 0) — function runs every frame,
+//       eliminating the 0.5s re-application gap after buff expiry.
+//   (2) 003167CC: addiu t5,zero,0x1F (0x240D001F) → addiu t5,zero,0x3C (0x240D003C)
+//       Loads t5=60 instead of 31. t5 is free to repurpose here (never read between
+//       003167CC and 0031681C — confirmed by full instruction scan).
+//   (3) 0031681C: sh t1,0x24(v0)    (0xA4490024) → sh t5,0x24(v0)    (0xA44D0024)
+//       Delay slot: writes t5=60 to ally cccc instead of the computed t1 (~52).
+//
+// The ally's buff now has a 60-tick (~1s) timer. With the throttle removed the
+// re-application function runs every frame → cccc never reaches 0 while ally
+// is in range. dddd (max damage, sh t1 at 00316814) is left unchanged.
+//
+// EXPIRY — both mechanisms continue to work without any extra patches:
+//   Out of range:  001BC560 (maintenance/decrement function) decrements cccc
+//                  each frame. When the ally is out of range the re-application
+//                  function stops writing, cccc counts down from its current
+//                  value to 0 over ≤60 frames (~1s), then 001BC708 clears the slot. ✓
+//   Spell ends:    Same — re-application stops → cccc decays → slot clears.   ✓
+//
+// Note: t5 is also used after 0x00316828 for the caster's own slot timer
+// (was 31, now 60). This means the caster's self-buff lingers ~1s after
+// the spell ends instead of ~0.5s — a minor cosmetic change, not a bug.
+// ============================================================
+
+// Patch 1: eliminate mod-30 re-application throttle
+//   The buff-application function normally skips its body unless (frame_counter % 30 == 0).
+//   Changing the divisor from 30 to 1 makes mod-1 = 0 always → runs every frame.
+//   Original: addiu v0,zero,0x1E   (00316578 = 0x2402001E)
+//   Fixed:    addiu v0,zero,0x01   (00316578 = 0x24020001)
+patch=1,EE,200316578,extended,24020001
+
+// Patch 2: raise t5 from 31 → 60 (t5 is the fixed timer written to ally cccc)
+//   60 frames = ~1s. Function now runs every frame → ally cccc never expires while in range. ✓
+//   Original: addiu t5,zero,0x1F   (003167CC = 0x240D001F)
+//   Fixed:    addiu t5,zero,0x3C   (003167CC = 0x240D003C)
+patch=1,EE,203167CC,extended,240D003C
+
+// Patch 3: delay slot of beq at 00316818 — write t5 (60) to ally cccc instead of t1 (~52)
+//   Original: sh t1,0x24(v0)       (0031681C = 0xA4490024)
+//   Fixed:    sh t5,0x24(v0)       (0031681C = 0xA44D0024)
+patch=1,EE,2031681C,extended,A44D0024

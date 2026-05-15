@@ -75,6 +75,20 @@ Three hook points intercept the game's elemental-merge instruction for each ench
 
 ---
 
+### Poison Weapon / Disease Blade Ally Buff Timer Fix
+`custom patches/SLUS-20973_4028A55F.WeaponEnchantINTScaling.pnach` — third checkbox
+
+Fixes the **ally AoE version** of Poison Weapon and Disease Blade flickering on and off while standing near the caster. Two root causes in the base game:
+
+1. The buff-application function only runs once every 30 frames (0.5s throttle), creating a guaranteed gap between buff expiry and re-application.
+2. The ally's buff timer is written from a weapon-stat-derived value (~52 ticks), which expires before the next re-application cycle.
+
+This patch removes the 30-frame throttle so the function runs every frame, and sets the ally timer to 60 ticks (~1s). The buff is now stable while the ally is in range and drops within ~1s when the ally moves out of range or the spell ends.
+
+Standalone — can be enabled without Weapon Enchant INT Scaling or Disease Blade On-Hit Fix.
+
+---
+
 ### Disease Blade On-Hit Fix
 `custom patches/SLUS-20973_4028A55F.WeaponEnchantINTScaling.pnach` — second checkbox
 
@@ -154,7 +168,7 @@ Dual-wielding and shield users are unaffected — the bonus only applies when th
 | File | Contents |
 |------|----------|
 | `SLUS-20973_4028A55F.INTScaling.pnach` | INT Scaling + Shield Bash Defense Scaling (two checkboxes) |
-| `SLUS-20973_4028A55F.WeaponEnchantINTScaling.pnach` | Weapon Enchant INT Scaling + Disease Blade On-Hit Fix (two checkboxes) |
+| `SLUS-20973_4028A55F.WeaponEnchantINTScaling.pnach` | Weapon Enchant INT Scaling + Disease Blade On-Hit Fix + Ally Buff Timer Fix (three checkboxes) |
 | `SLUS-20973_4028A55F.WeaponRebalance.pnach` | 2H Damage Bonus + 1H Attack Speed Bonus (two checkboxes) |
 
 `INTScaling.pnach` sections:
@@ -164,6 +178,7 @@ Dual-wielding and shield users are unaffected — the bonus only applies when th
 `WeaponEnchantINTScaling.pnach` sections:
 - **Weapon Enchant INT Scaling** — Fire/Cold/Lightning Weapons elemental scales with INT (standalone)
 - **Disease Blade On-Hit Fix** — fixes Disease Blade and Poison Weapon dealing no elemental damage (standalone)
+- **Poison Weapon Ally Buff Timer Fix** — fixes ally AoE buff flickering on/off near caster (standalone)
 
 `WeaponRebalance.pnach` sections:
 - **2H Damage Bonus** — +20% physical and elemental damage for 2H weapons (standalone)
