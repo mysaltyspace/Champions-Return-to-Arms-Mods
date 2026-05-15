@@ -1,7 +1,7 @@
 gametitle=Champions: Return to Arms * NTSC-U * SLUS-20973 * 4028A55F
 [2H Weapon Damage Bonus]
 author=mysaltyspace created with Claude code
-description=2H melee weapons deal +20% physical and elemental (Fire/Cold/Lightning/Disease/Poison) damage. Physical: pre-crit min/max and weapon damage parameter scaling. Elemental: scales f0/f20 before INT scaling; chains with WeaponEnchantINTScaling when both loaded. Disease/Poison elemental requires DiseasePoisonFix (bundled in WeaponEnchantINTScaling). Bows and throwing weapons unaffected. Stacks with INTScaling.
+description=2H melee weapons deal +20% physical and elemental (Fire/Cold/Lightning/Disease/Poison) damage. Physical: pre-crit min/max and weapon damage parameter scaling. Elemental: scales f0/f20 before INT scaling; chains with WeaponEnchantFixAndScaling when both loaded. Disease/Poison elemental requires DiseasePoisonFix (bundled in WeaponEnchantFixAndScaling). Bows and throwing weapons unaffected. Stacks with INTScaling.
 
 // ============================================================
 // HOW THIS WORKS
@@ -13,15 +13,15 @@ description=2H melee weapons deal +20% physical and elemental (Fire/Cold/Lightni
 //   Cold-boot safe — no persistent struct fields modified.
 //
 // ELEMENTAL FIRE/COLD/LIGHTNING (hooks at 001E9928 / 001E9AD8 / 001E9F50):
-//   WeaponRebalance hooks the same addresses as WeaponEnchantINTScaling.
-//   Since "WeaponRebalance" sorts after "WeaponEnchantINTScaling", these
-//   patches overwrite WeaponEnchantINTScaling's hooks when both are loaded.
+//   WeaponRebalance hooks the same addresses as WeaponEnchantFixAndScaling.
+//   Since "WeaponRebalance" sorts after "WeaponEnchantFixAndScaling", these
+//   patches overwrite WeaponEnchantFixAndScaling's hooks when both are loaded.
 //   Each detour:
 //     1. Reads flag byte from 008DA740.
 //     2. If 2H: multiplies elemental register (f0 or f20) by 1.2.
-//     3. Checks if WeaponEnchantINTScaling's detour is present (reads the
+//     3. Checks if WeaponEnchantFixAndScaling's detour is present (reads the
 //        first word of its detour — 0 if absent, 27BDFFE0 if loaded).
-//     4. If loaded: chains to WeaponEnchantINTScaling's detour which handles
+//     4. If loaded: chains to WeaponEnchantFixAndScaling's detour which handles
 //        INT scaling, add.s, and original bne/jal replication.
 //        Effect: elemental = base × 1.2 × (1 + INT_bonus). Both stack.
 //     5. If not loaded: replicates original bne/jal behavior directly.
@@ -49,7 +49,7 @@ description=2H melee weapons deal +20% physical and elemental (Fire/Cold/Lightni
 // REGISTER USE (elemental detours):
 //   at, t9: clobbered (assembler temp and caller-saved — safe at hook points)
 //   f10: clobbered (caller-saved FPU temp)
-//   f0 / f20: conditionally scaled by 1.2; WeaponEnchantINTScaling sees scaled value
+//   f0 / f20: conditionally scaled by 1.2; WeaponEnchantFixAndScaling sees scaled value
 // ============================================================
 
 // ============================================================
@@ -60,7 +60,7 @@ description=2H melee weapons deal +20% physical and elemental (Fire/Cold/Lightni
 patch=1,EE,201B6FD8,extended,08236963  // j 008DA58C            (was: AFA20000 sw v0,0x0(sp))
 patch=1,EE,201B6FDC,extended,00000000  // nop                    (was: 0C0F36C2 jal z_un_003cdb08)
 
-// Fire Weapons elemental hook (overrides WeaponEnchantINTScaling when both loaded)
+// Fire Weapons elemental hook (overrides WeaponEnchantFixAndScaling when both loaded)
 patch=1,EE,201E9928,extended,08236994  // j 008DA650             (was: 14C00009 bne or 08236700 WEI)
 patch=1,EE,201E992C,extended,00000000  // nop                    (was: 4600BDC0 add.s or 00000000)
 
@@ -169,7 +169,7 @@ patch=1,EE,208DA64C,extended,00000000  // nop
 // At entry: f0 = fire enchant elemental damage.
 //
 // 1. If 2H flag: f0 *= 1.2
-// 2. Check 008D9C00 (WeaponEnchantINTScaling fire detour start):
+// 2. Check 008D9C00 (WeaponEnchantFixAndScaling fire detour start):
 //      non-zero → chain there (INT scaling + bne replication + return 001E9930/001E9950)
 //      zero     → replicate original bne a2,zero,001E9950 + add.s f23,f23,f0
 // ============================================================
@@ -186,7 +186,7 @@ patch=1,EE,208DA670,extended,3C01008E  // lui at,0x008E
 patch=1,EE,208DA674,extended,8C399C00  // lw t9,0x9C00(at) → 008D9C00 (WEI fire detour start)
 patch=1,EE,208DA678,extended,11200003  // beq t9,zero,+3 → 008DA688 (not_loaded_f)
 patch=1,EE,208DA67C,extended,00000000  // nop
-patch=1,EE,208DA680,extended,08236700  // j 008D9C00                chain to WeaponEnchantINTScaling fire
+patch=1,EE,208DA680,extended,08236700  // j 008D9C00                chain to WeaponEnchantFixAndScaling fire
 patch=1,EE,208DA684,extended,00000000  // nop
 // not_loaded_f: replicate original bne a2,zero,001E9950 + delay add.s f23,f23,f0
 patch=1,EE,208DA688,extended,14C00003  // bne a2,zero,+3 → 008DA698 (take_f)
@@ -204,7 +204,7 @@ patch=1,EE,208DA69C,extended,00000000  // nop
 // At entry: f20 = cold enchant elemental damage.
 //
 // 1. If 2H flag: f20 *= 1.2
-// 2. Check 008D9E00 (WeaponEnchantINTScaling cold detour start):
+// 2. Check 008D9E00 (WeaponEnchantFixAndScaling cold detour start):
 //      non-zero → chain (INT scaling + jal replication + return 001E9AE0)
 //      zero     → replicate jal z_un_00214428 via jalr; add.s f23,f23,f20 in delay
 // ============================================================
@@ -221,7 +221,7 @@ patch=1,EE,208DA6C0,extended,3C01008E  // lui at,0x008E
 patch=1,EE,208DA6C4,extended,8C399E00  // lw t9,0x9E00(at) → 008D9E00 (WEI cold detour start)
 patch=1,EE,208DA6C8,extended,11200003  // beq t9,zero,+3 → 008DA6D8 (not_loaded_c)
 patch=1,EE,208DA6CC,extended,00000000  // nop
-patch=1,EE,208DA6D0,extended,08236780  // j 008D9E00                chain to WeaponEnchantINTScaling cold
+patch=1,EE,208DA6D0,extended,08236780  // j 008D9E00                chain to WeaponEnchantFixAndScaling cold
 patch=1,EE,208DA6D4,extended,00000000  // nop
 // not_loaded_c: replicate jal z_un_00214428 (0x00214428) + add.s f23,f23,f20 + return 001E9AE0
 patch=1,EE,208DA6D8,extended,3C010021  // lui at,0x0021              load z_un_00214428 addr
@@ -239,7 +239,7 @@ patch=1,EE,208DA6EC,extended,00000000  // nop
 // At entry: f0 = lightning enchant elemental damage.
 //
 // 1. If 2H flag: f0 *= 1.2
-// 2. Check 008DA000 (WeaponEnchantINTScaling lightning detour start):
+// 2. Check 008DA000 (WeaponEnchantFixAndScaling lightning detour start):
 //      non-zero → chain (INT scaling + jal replication + return 001E9F58)
 //      zero     → replicate jal z_un_0017365c via jalr; add.s f23,f23,f0 in delay
 // ============================================================
@@ -256,7 +256,7 @@ patch=1,EE,208DA710,extended,3C01008E  // lui at,0x008E
 patch=1,EE,208DA714,extended,8C39A000  // lw t9,0xA000(at) → 008DA000 (WEI lightning detour start)
 patch=1,EE,208DA718,extended,11200003  // beq t9,zero,+3 → 008DA728 (not_loaded_l)
 patch=1,EE,208DA71C,extended,00000000  // nop
-patch=1,EE,208DA720,extended,08236800  // j 008DA000                chain to WeaponEnchantINTScaling lightning
+patch=1,EE,208DA720,extended,08236800  // j 008DA000                chain to WeaponEnchantFixAndScaling lightning
 patch=1,EE,208DA724,extended,00000000  // nop
 // not_loaded_l: replicate jal z_un_0017365c (0x0017365C) + add.s f23,f23,f0 + return 001E9F58
 patch=1,EE,208DA728,extended,3C010017  // lui at,0x0017              load z_un_0017365C addr

@@ -1,0 +1,1065 @@
+gametitle=Champions: Return to Arms * NTSC-U * SLUS-20973 * 4028A55F
+[Weapon Enchant INT Scaling]
+author=mysaltyspace created with Claude code
+description=Elemental damage from Fire/Cold/Lightning Weapons spells scales with INT. Same tiered formula as INTScaling: 0.5%/pt to 100, 0.4%/pt to 200, 0.3%/pt to 300, 0.2%/pt beyond. Socketed gem elemental unaffected. Compatible with INTScaling patch (enable independently). Disease Blade on-hit fix available as second section (enable independently).
+
+// ============================================================
+// HOW THIS WORKS
+// ============================================================
+// When a spell-buffed weapon hits an enemy the elemental contribution
+// is computed inside z_un_001e8230 and then merged into f23 via an
+// add.s f23,f23,fX sitting in the delay slot of a JAL or BNE.
+//
+// We replace the JAL/BNE (and NOP its delay slot) with a jump to a
+// detour that:  (1) guards on slot data to skip socket gems, (2) scales
+// fX with the INT multiplier, (3) restores registers, (4) executes the
+// displaced add.s, and (5) calls the original JAL target / replicates
+// the original BNE before returning to game code.
+//
+// DISCRIMINANT (all three hooks — multi-slot scanner, 2-field check per slot):
+//   Each Weapons buff occupies the FIRST available empty slot in the 4-slot
+//   array at s1+0x20..s1+0x38.  Slot index is not fixed.
+//   Per slot (stride 8): word0 at s1+0x20/0x28/0x30/0x38, word1 at s1+0x24/0x2C/0x34/0x3C
+//   word0 layout (aaaabbbb): aaaa=min damage (VARIABLE), bbbb=element code (FIXED):
+//     Fire=0x0015  Cold=0x0016  Lightning=0x0018  Empty=0xFFFF
+//   word1 layout (ccccdddd): cccc=timer (>0 buff, ==0 gem/empty), dddd=max damage
+//   lhu at word0_base   → reads bbbb (lo16 of word0) → element code check
+//   lhu at word0_base+6 → reads cccc (hi16 of word1) → timer check
+//   Scanner: check all 4 slots; first slot with matching bbbb AND cccc>0 → buff → scale.
+//   No match → skip path (gem, wrong element, or empty).
+//   Scanners: Lightning@008DA168, Fire@008DA1C0, Cold@008DA218
+//
+// HOOK MAP:
+//   Element    Address   Replaced instruction          Delay slot (NOPped)      Enchant reg  Return
+//   Fire       001E9928  bne a2,zero,001E9950 14C00009 add.s f23,f23,f0 4600BDC0  f0        001E9930 or 001E9950
+//   Cold       001E9AD8  jal z_un_00214428    0C08510A add.s f23,f23,f20 4614BDC0 f20       001E9AE0
+//   Lightning  001E9F50  jal z_un_0017365c    0C05CD97 add.s f23,f23,f0  4600BDC0 f0        001E9F58
+//
+// INT address:   per-player via entity slot → stride 0x4C30
+//                P1=004D8B84, P2=004DD7B4, P3=004E23E4, P4=004E7014
+//                player_index = (s4 − 0x006C88C0) / 0x0BB8
+//                fallback to P1 if player_index ≥ 4 or INT reads as 0 (SP quirk)
+// Free memory:   008D9C00 – 008DA2C8  (INTScaling.pnach ends at 008D9B44)
+// ============================================================
+
+// ============================================================
+// HOOK PATCHES — rewrite the three game-code hook sites
+// ============================================================
+
+// Fire Weapons — replace bne + NOP its delay slot
+patch=1,EE,201E9928,extended,08236700 // j 008D9C00        (was: bne a2,zero,001E9950 = 14C00009)
+patch=1,EE,201E992C,extended,00000000 // nop               (was: add.s f23,f23,f0    = 4600BDC0)
+
+// Cold Weapons — replace jal + NOP its delay slot
+patch=1,EE,201E9AD8,extended,08236780 // j 008D9E00        (was: jal z_un_00214428   = 0C08510A)
+patch=1,EE,201E9ADC,extended,00000000 // nop               (was: add.s f23,f23,f20   = 4614BDC0)
+
+// Lightning Weapons — replace jal + NOP its delay slot
+patch=1,EE,201E9F50,extended,08236800 // j 008DA000        (was: jal z_un_0017365c   = 0C05CD97)
+patch=1,EE,201E9F54,extended,00000000 // nop               (was: add.s f23,f23,f0    = 4600BDC0)
+
+// ============================================================
+// FIRE WEAPONS DETOUR  at 008D9C00
+//
+// Enchant register: f0.  f0 is saved at entry so it can serve as the
+// bonus accumulator (same trick as INTScaling.pnach).  After the four
+// tiers f0 = 1.0+bonus; original enchant is in f3 (loaded from stack),
+// so  mul.s f0,f3,f0  puts the scaled enchant back into f0.  Scaled
+// value is stored to sp+0x0C so the shared restore block works for
+// both the scale and skip paths.
+//
+// Return replicates original bne a2,zero,001E9950:
+//   a2 ≠ 0  →  j 001E9950  (branch taken)
+//   a2 = 0  →  j 001E9930  (fall-through after delay slot)
+// add.s f23,f23,f0 lives in the delay slot of the bne replica so it
+// always executes exactly once on either path.
+//
+// Stack frame (32 bytes):
+//   sp+0x00 at   sp+0x04 t0   sp+0x08 t1
+//   sp+0x0C f0   sp+0x10 f1   sp+0x14 f2   sp+0x18 f3   sp+0x1C —
+// ============================================================
+
+// ---- PROLOGUE
+patch=1,EE,208D9C00,extended,27BDFFE0 // addiu sp,sp,-0x20
+patch=1,EE,208D9C04,extended,AFA10000 // sw at,0x00(sp)
+patch=1,EE,208D9C08,extended,AFA80004 // sw t0,0x04(sp)
+patch=1,EE,208D9C0C,extended,AFA90008 // sw t1,0x08(sp)
+patch=1,EE,208D9C10,extended,E7A0000C // swc1 f0,0x0C(sp)     save fire enchant value
+patch=1,EE,208D9C14,extended,E7A10010 // swc1 f1,0x10(sp)
+patch=1,EE,208D9C18,extended,E7A20014 // swc1 f2,0x14(sp)
+patch=1,EE,208D9C1C,extended,E7A30018 // swc1 f3,0x18(sp)
+
+// ---- GUARD: jump to multi-slot fire scanner at 008DA1C0
+// element code 0x0015 (fire bbbb); scanner checks bbbb+timer; match → 008D9C30; no match → 008D9D38
+patch=1,EE,208D9C20,extended,00000000 // nop                    (t0 not pre-set; scanner loads directly)
+patch=1,EE,208D9C24,extended,08236870 // j 008DA1C0             → fire scanner
+patch=1,EE,208D9C28,extended,34090015 // [delay] ori t1,zero,0x0015  t1 = fire element code
+patch=1,EE,208D9C2C,extended,00000000 // nop
+
+// ---- LOAD INT — j-trampoline to per-player lookup at 008D9D70
+// lookup returns to 008D9C38 (float conversion) with t0 = player INT
+patch=1,EE,208D9C30,extended,0823675C // j 008D9D70              → fire INT lookup
+patch=1,EE,208D9C34,extended,00000000 // nop
+
+// ---- CONVERT INT TO FLOAT  (f0 is free — saved above)
+patch=1,EE,208D9C38,extended,44880000 // mtc1 t0,f0
+patch=1,EE,208D9C3C,extended,46800020 // cvt.s.w f0,f0           f0 = float(INT)
+patch=1,EE,208D9C40,extended,46000086 // mov.s f2,f0             f2 = float(INT)
+patch=1,EE,208D9C44,extended,44800000 // mtc1 zero,f0            f0 = 0.0  (bonus accumulator)
+
+// ---- TIER 1: INT 20–100, +0.5%/pt  (max +40%)
+patch=1,EE,208D9C48,extended,3C0942C8 // lui t1,0x42C8           100.0f
+patch=1,EE,208D9C4C,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208D9C50,extended,460110E9 // min.s f3,f2,f1          f3 = min(INT,100)
+patch=1,EE,208D9C54,extended,3C0941A0 // lui t1,0x41A0           20.0f
+patch=1,EE,208D9C58,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208D9C5C,extended,460118C1 // sub.s f3,f3,f1          f3 = min(INT,100) − 20
+patch=1,EE,208D9C60,extended,46030034 // c.lt.s f0,f3            FCC = (0.0 < f3)
+patch=1,EE,208D9C64,extended,45000006 // bc1f +6 → 008D9C80      skip if INT ≤ 20
+patch=1,EE,208D9C68,extended,00000000 // nop
+patch=1,EE,208D9C6C,extended,3C093BA3 // lui t1,0x3BA3           0.005f hi
+patch=1,EE,208D9C70,extended,3529D70A // ori t1,t1,0xD70A        0.005f  (3BA3D70A)
+patch=1,EE,208D9C74,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208D9C78,extended,460118C2 // mul.s f3,f3,f1          pts_in_t1 * 0.005
+patch=1,EE,208D9C7C,extended,46030000 // add.s f0,f0,f3          accumulate
+// 008D9C80: skip_t1
+
+// ---- TIER 2: INT 100–200, +0.4%/pt  (max +40%)
+patch=1,EE,208D9C80,extended,3C094348 // lui t1,0x4348           200.0f
+patch=1,EE,208D9C84,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208D9C88,extended,460110E9 // min.s f3,f2,f1          f3 = min(INT,200)
+patch=1,EE,208D9C8C,extended,3C0942C8 // lui t1,0x42C8           100.0f
+patch=1,EE,208D9C90,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208D9C94,extended,460118C1 // sub.s f3,f3,f1          f3 = min(INT,200) − 100
+patch=1,EE,208D9C98,extended,46030034 // c.lt.s f0,f3
+patch=1,EE,208D9C9C,extended,45000006 // bc1f +6 → 008D9CB8      skip if INT ≤ 100
+patch=1,EE,208D9CA0,extended,00000000 // nop
+patch=1,EE,208D9CA4,extended,3C093B83 // lui t1,0x3B83           0.004f hi
+patch=1,EE,208D9CA8,extended,3529126F // ori t1,t1,0x126F        0.004f  (3B83126F)
+patch=1,EE,208D9CAC,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208D9CB0,extended,460118C2 // mul.s f3,f3,f1          pts_in_t2 * 0.004
+patch=1,EE,208D9CB4,extended,46030000 // add.s f0,f0,f3          accumulate
+// 008D9CB8: skip_t2
+
+// ---- TIER 3: INT 200–300, +0.3%/pt  (max +30%)
+patch=1,EE,208D9CB8,extended,3C094396 // lui t1,0x4396           300.0f
+patch=1,EE,208D9CBC,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208D9CC0,extended,460110E9 // min.s f3,f2,f1          f3 = min(INT,300)
+patch=1,EE,208D9CC4,extended,3C094348 // lui t1,0x4348           200.0f
+patch=1,EE,208D9CC8,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208D9CCC,extended,460118C1 // sub.s f3,f3,f1          f3 = min(INT,300) − 200
+patch=1,EE,208D9CD0,extended,46030034 // c.lt.s f0,f3
+patch=1,EE,208D9CD4,extended,45000006 // bc1f +6 → 008D9CF0      skip if INT ≤ 200
+patch=1,EE,208D9CD8,extended,00000000 // nop
+patch=1,EE,208D9CDC,extended,3C093B44 // lui t1,0x3B44           0.003f hi
+patch=1,EE,208D9CE0,extended,35299BA6 // ori t1,t1,0x9BA6        0.003f  (3B449BA6)
+patch=1,EE,208D9CE4,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208D9CE8,extended,460118C2 // mul.s f3,f3,f1          pts_in_t3 * 0.003
+patch=1,EE,208D9CEC,extended,46030000 // add.s f0,f0,f3          accumulate
+// 008D9CF0: skip_t3
+
+// ---- TIER 4: INT 300+, +0.2%/pt  (no cap)
+patch=1,EE,208D9CF0,extended,460010C6 // mov.s f3,f2             f3 = float(INT)
+patch=1,EE,208D9CF4,extended,3C094396 // lui t1,0x4396           300.0f
+patch=1,EE,208D9CF8,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208D9CFC,extended,460118C1 // sub.s f3,f3,f1          f3 = INT − 300
+patch=1,EE,208D9D00,extended,46030034 // c.lt.s f0,f3
+patch=1,EE,208D9D04,extended,45000006 // bc1f +6 → 008D9D20      skip if INT ≤ 300
+patch=1,EE,208D9D08,extended,00000000 // nop
+patch=1,EE,208D9D0C,extended,3C093B03 // lui t1,0x3B03           0.002f hi
+patch=1,EE,208D9D10,extended,3529126F // ori t1,t1,0x126F        0.002f  (3B03126F)
+patch=1,EE,208D9D14,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208D9D18,extended,460118C2 // mul.s f3,f3,f1          pts_above_300 * 0.002
+patch=1,EE,208D9D1C,extended,46030000 // add.s f0,f0,f3          accumulate
+// 008D9D20: skip_t4
+
+// ---- APPLY: build multiplier, scale the saved fire enchant, write back
+// f0 = 1.0 + bonus; f3 = original enchant (from stack); f0 = enchant * multiplier
+patch=1,EE,208D9D20,extended,3C093F80 // lui t1,0x3F80           1.0f
+patch=1,EE,208D9D24,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208D9D28,extended,46000800 // add.s f0,f1,f0          f0 = 1.0 + bonus
+patch=1,EE,208D9D2C,extended,C7A3000C // lwc1 f3,0x0C(sp)        f3 = original fire enchant
+patch=1,EE,208D9D30,extended,46001802 // mul.s f0,f3,f0          f0 = enchant * (1.0+bonus)
+patch=1,EE,208D9D34,extended,E7A0000C // swc1 f0,0x0C(sp)        store scaled enchant back
+// 008D9D38: skip_scale — scale path and skip path both land here
+
+// ---- RESTORE
+patch=1,EE,208D9D38,extended,8FA10000 // lw at,0x00(sp)
+patch=1,EE,208D9D3C,extended,8FA80004 // lw t0,0x04(sp)
+patch=1,EE,208D9D40,extended,8FA90008 // lw t1,0x08(sp)
+patch=1,EE,208D9D44,extended,C7A0000C // lwc1 f0,0x0C(sp)        f0 = scaled or original
+patch=1,EE,208D9D48,extended,C7A10010 // lwc1 f1,0x10(sp)
+patch=1,EE,208D9D4C,extended,C7A20014 // lwc1 f2,0x14(sp)
+patch=1,EE,208D9D50,extended,C7A30018 // lwc1 f3,0x18(sp)
+patch=1,EE,208D9D54,extended,27BD0020 // addiu sp,sp,0x20
+
+// ---- RETURN: replicate bne a2,zero,001E9950 with displaced add.s in delay slot
+// add.s always executes (delay slot of bne runs before the branch resolves).
+// bne offset: fire_taken (008D9D68) → (008D9D68 - 008D9D58 - 4) / 4 = 3
+// j 001E9930 = 0x0807A64C   (001E9930 >> 2 = 0x07A64C)
+// j 001E9950 = 0x0807A654   (001E9950 >> 2 = 0x07A654)
+patch=1,EE,208D9D58,extended,14C00003 // bne a2,zero,+3          → 008D9D68 if a2 ≠ 0
+patch=1,EE,208D9D5C,extended,4600BDC0 // [delay slot] add.s f23,f23,f0  (displaced)
+patch=1,EE,208D9D60,extended,0807A64C // j 001E9930              fall-through (a2 = 0)
+patch=1,EE,208D9D64,extended,00000000 // nop
+// 008D9D68: fire_taken
+patch=1,EE,208D9D68,extended,0807A654 // j 001E9950              taken (a2 ≠ 0)
+patch=1,EE,208D9D6C,extended,00000000 // nop
+// fire detour end: 008D9D70
+
+// ============================================================
+// FIRE INT LOOKUP  at 008D9D70
+//
+// Entry: s4 = attacking entity pointer.
+// Computes player_index = (s4 − 0x006C88C0) / 0x0BB8.
+// player_index ≥ 4 → invalid entity → fallback to P1 INT.
+// Otherwise: t0 = INT at 0x004D8B84 + player_index × 0x4C30.
+// If that INT == 0 (SP quirk for slot 0): fallback to P1.
+// Returns to 008D9C38 (float conversion) with t0 = INT.
+// ============================================================
+patch=1,EE,208D9D70,extended,3C09006C // lui t1,0x006C
+patch=1,EE,208D9D74,extended,352988C0 // ori t1,t1,0x88C0          t1 = 0x006C88C0 (entity base)
+patch=1,EE,208D9D78,extended,02894023 // subu t0,s4,t1              t0 = s4 − entity_base
+patch=1,EE,208D9D7C,extended,34090BB8 // ori t1,zero,0x0BB8         entity stride (3000 bytes)
+patch=1,EE,208D9D80,extended,0109001B // divu t0,t1
+patch=1,EE,208D9D84,extended,00004012 // mflo t0                    t0 = player_index
+patch=1,EE,208D9D88,extended,2D010004 // sltiu at,t0,4              at=1 if player_index < 4
+patch=1,EE,208D9D8C,extended,10200009 // beq at,zero,+9→008D9DB4   invalid → fallback
+patch=1,EE,208D9D90,extended,3C09004E // [delay] lui t1,0x004E
+patch=1,EE,208D9D94,extended,34094C30 // ori t1,zero,0x4C30         INT per-player stride
+patch=1,EE,208D9D98,extended,01090019 // multu t0,t1                player_index × INT_stride
+patch=1,EE,208D9D9C,extended,00004012 // mflo t0                    t0 = byte offset
+patch=1,EE,208D9DA0,extended,3C09004E // lui t1,0x004E
+patch=1,EE,208D9DA4,extended,25298B84 // addiu t1,t1,0x8B84         t1 = 0x004D8B84 (P1 INT base)
+patch=1,EE,208D9DA8,extended,01094021 // addu t0,t0,t1              t0 = this player's INT address
+patch=1,EE,208D9DAC,extended,8D080000 // lw t0,0(t0)               t0 = player INT
+patch=1,EE,208D9DB0,extended,15000003 // bne t0,zero,+3→008D9DC0   non-zero → use it
+patch=1,EE,208D9DB4,extended,3C09004E // [delay / fallback entry] lui t1,0x004E
+patch=1,EE,208D9DB8,extended,25298B84 // addiu t1,t1,0x8B84         t1 = 0x004D8B84
+patch=1,EE,208D9DBC,extended,8D280000 // lw t0,0(t1)               t0 = P1 fallback INT
+patch=1,EE,208D9DC0,extended,0823670E // j 008D9C38                → float conversion   (return label)
+patch=1,EE,208D9DC4,extended,00000000 // nop
+// fire lookup end: 008D9DC8
+
+// ============================================================
+// COLD WEAPONS DETOUR  at 008D9E00
+//
+// Enchant register: f20.  f0 is entirely free and serves as the bonus
+// accumulator throughout (no save needed for f0).  f20 is saved to
+// sp+0x0C; after computing the multiplier into f0, f3 = saved f20 is
+// multiplied and the result is stored back to sp+0x0C, so the shared
+// restore block loads the scaled value into f20.
+//
+// Return: displaced add.s f23,f23,f20 is placed in the delay slot of
+// jal z_un_00214428 (the original JAL target), so the add runs before
+// the call — matching original execution order.  After z_un_00214428
+// returns (to 008D9F60) we j 001E9AE0 back to game code.
+//
+// Stack frame: same layout as fire with f20 at sp+0x0C instead of f0.
+// ============================================================
+
+// ---- PROLOGUE
+patch=1,EE,208D9E00,extended,27BDFFE0 // addiu sp,sp,-0x20
+patch=1,EE,208D9E04,extended,AFA10000 // sw at,0x00(sp)
+patch=1,EE,208D9E08,extended,AFA80004 // sw t0,0x04(sp)
+patch=1,EE,208D9E0C,extended,AFA90008 // sw t1,0x08(sp)
+patch=1,EE,208D9E10,extended,E7B4000C // swc1 f20,0x0C(sp)       save cold enchant value
+patch=1,EE,208D9E14,extended,E7A10010 // swc1 f1,0x10(sp)
+patch=1,EE,208D9E18,extended,E7A20014 // swc1 f2,0x14(sp)
+patch=1,EE,208D9E1C,extended,E7A30018 // swc1 f3,0x18(sp)
+
+// ---- GUARD: jump to multi-slot cold scanner at 008DA218
+// element code 0x0016 (cold bbbb); scanner checks bbbb+timer; match → 008D9E30; no match → 008D9F38
+patch=1,EE,208D9E20,extended,00000000 // nop                    (t0 not pre-set; scanner loads directly)
+patch=1,EE,208D9E24,extended,08236886 // j 008DA218             → cold scanner
+patch=1,EE,208D9E28,extended,34090016 // [delay] ori t1,zero,0x0016  t1 = cold element code
+patch=1,EE,208D9E2C,extended,00000000 // nop
+
+// ---- LOAD INT — j-trampoline to per-player lookup at 008D9F68
+// lookup returns to 008D9E38 (float conversion) with t0 = player INT
+patch=1,EE,208D9E30,extended,082367DA // j 008D9F68              → cold INT lookup
+patch=1,EE,208D9E34,extended,00000000 // nop
+
+// ---- CONVERT INT TO FLOAT  (f0 is free for cold — not the enchant reg)
+patch=1,EE,208D9E38,extended,44880000 // mtc1 t0,f0
+patch=1,EE,208D9E3C,extended,46800020 // cvt.s.w f0,f0
+patch=1,EE,208D9E40,extended,46000086 // mov.s f2,f0              f2 = float(INT)
+patch=1,EE,208D9E44,extended,44800000 // mtc1 zero,f0             f0 = 0.0 (accumulator)
+
+// ---- TIER 1: INT 20–100, +0.5%/pt
+patch=1,EE,208D9E48,extended,3C0942C8 // lui t1,0x42C8            100.0f
+patch=1,EE,208D9E4C,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208D9E50,extended,460110E9 // min.s f3,f2,f1           f3 = min(INT,100)
+patch=1,EE,208D9E54,extended,3C0941A0 // lui t1,0x41A0            20.0f
+patch=1,EE,208D9E58,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208D9E5C,extended,460118C1 // sub.s f3,f3,f1           f3 = min(INT,100) − 20
+patch=1,EE,208D9E60,extended,46030034 // c.lt.s f0,f3
+patch=1,EE,208D9E64,extended,45000006 // bc1f +6 → 008D9E80       skip if INT ≤ 20
+patch=1,EE,208D9E68,extended,00000000 // nop
+patch=1,EE,208D9E6C,extended,3C093BA3 // lui t1,0x3BA3            0.005f hi
+patch=1,EE,208D9E70,extended,3529D70A // ori t1,t1,0xD70A         0.005f
+patch=1,EE,208D9E74,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208D9E78,extended,460118C2 // mul.s f3,f3,f1           pts * 0.005
+patch=1,EE,208D9E7C,extended,46030000 // add.s f0,f0,f3           accumulate
+// 008D9E80: skip_t1
+
+// ---- TIER 2: INT 100–200, +0.4%/pt
+patch=1,EE,208D9E80,extended,3C094348 // lui t1,0x4348            200.0f
+patch=1,EE,208D9E84,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208D9E88,extended,460110E9 // min.s f3,f2,f1           f3 = min(INT,200)
+patch=1,EE,208D9E8C,extended,3C0942C8 // lui t1,0x42C8            100.0f
+patch=1,EE,208D9E90,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208D9E94,extended,460118C1 // sub.s f3,f3,f1           f3 = min(INT,200) − 100
+patch=1,EE,208D9E98,extended,46030034 // c.lt.s f0,f3
+patch=1,EE,208D9E9C,extended,45000006 // bc1f +6 → 008D9EB8       skip if INT ≤ 100
+patch=1,EE,208D9EA0,extended,00000000 // nop
+patch=1,EE,208D9EA4,extended,3C093B83 // lui t1,0x3B83            0.004f hi
+patch=1,EE,208D9EA8,extended,3529126F // ori t1,t1,0x126F         0.004f
+patch=1,EE,208D9EAC,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208D9EB0,extended,460118C2 // mul.s f3,f3,f1           pts * 0.004
+patch=1,EE,208D9EB4,extended,46030000 // add.s f0,f0,f3           accumulate
+// 008D9EB8: skip_t2
+
+// ---- TIER 3: INT 200–300, +0.3%/pt
+patch=1,EE,208D9EB8,extended,3C094396 // lui t1,0x4396            300.0f
+patch=1,EE,208D9EBC,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208D9EC0,extended,460110E9 // min.s f3,f2,f1           f3 = min(INT,300)
+patch=1,EE,208D9EC4,extended,3C094348 // lui t1,0x4348            200.0f
+patch=1,EE,208D9EC8,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208D9ECC,extended,460118C1 // sub.s f3,f3,f1           f3 = min(INT,300) − 200
+patch=1,EE,208D9ED0,extended,46030034 // c.lt.s f0,f3
+patch=1,EE,208D9ED4,extended,45000006 // bc1f +6 → 008D9EF0       skip if INT ≤ 200
+patch=1,EE,208D9ED8,extended,00000000 // nop
+patch=1,EE,208D9EDC,extended,3C093B44 // lui t1,0x3B44            0.003f hi
+patch=1,EE,208D9EE0,extended,35299BA6 // ori t1,t1,0x9BA6         0.003f
+patch=1,EE,208D9EE4,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208D9EE8,extended,460118C2 // mul.s f3,f3,f1           pts * 0.003
+patch=1,EE,208D9EEC,extended,46030000 // add.s f0,f0,f3           accumulate
+// 008D9EF0: skip_t3
+
+// ---- TIER 4: INT 300+, +0.2%/pt
+patch=1,EE,208D9EF0,extended,460010C6 // mov.s f3,f2              f3 = float(INT)
+patch=1,EE,208D9EF4,extended,3C094396 // lui t1,0x4396            300.0f
+patch=1,EE,208D9EF8,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208D9EFC,extended,460118C1 // sub.s f3,f3,f1           f3 = INT − 300
+patch=1,EE,208D9F00,extended,46030034 // c.lt.s f0,f3
+patch=1,EE,208D9F04,extended,45000006 // bc1f +6 → 008D9F20       skip if INT ≤ 300
+patch=1,EE,208D9F08,extended,00000000 // nop
+patch=1,EE,208D9F0C,extended,3C093B03 // lui t1,0x3B03            0.002f hi
+patch=1,EE,208D9F10,extended,3529126F // ori t1,t1,0x126F         0.002f
+patch=1,EE,208D9F14,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208D9F18,extended,460118C2 // mul.s f3,f3,f1           pts * 0.002
+patch=1,EE,208D9F1C,extended,46030000 // add.s f0,f0,f3           accumulate
+// 008D9F20: skip_t4
+
+// ---- APPLY: scale f20
+// mul.s f3,f3,f0 encodes as 460018C2 (ft=f0=0, fs=f3=3, fd=f3=3, func=2)
+patch=1,EE,208D9F20,extended,3C093F80 // lui t1,0x3F80            1.0f
+patch=1,EE,208D9F24,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208D9F28,extended,46000800 // add.s f0,f1,f0           f0 = 1.0 + bonus
+patch=1,EE,208D9F2C,extended,C7A3000C // lwc1 f3,0x0C(sp)         f3 = original cold enchant
+patch=1,EE,208D9F30,extended,460018C2 // mul.s f3,f3,f0           f3 = enchant * (1.0+bonus)
+patch=1,EE,208D9F34,extended,E7A3000C // swc1 f3,0x0C(sp)         store scaled enchant back
+// 008D9F38: skip_scale
+
+// ---- RESTORE
+patch=1,EE,208D9F38,extended,8FA10000 // lw at,0x00(sp)
+patch=1,EE,208D9F3C,extended,8FA80004 // lw t0,0x04(sp)
+patch=1,EE,208D9F40,extended,8FA90008 // lw t1,0x08(sp)
+patch=1,EE,208D9F44,extended,C7B4000C // lwc1 f20,0x0C(sp)        f20 = scaled or original
+patch=1,EE,208D9F48,extended,C7A10010 // lwc1 f1,0x10(sp)
+patch=1,EE,208D9F4C,extended,C7A20014 // lwc1 f2,0x14(sp)
+patch=1,EE,208D9F50,extended,C7A30018 // lwc1 f3,0x18(sp)
+patch=1,EE,208D9F54,extended,27BD0020 // addiu sp,sp,0x20
+
+// ---- RETURN: displaced add.s in delay slot of jal; call original JAL target
+// jal z_un_00214428 = 0x0C08510A  (0x00214428 >> 2 = 0x0008510A)
+// z_un_00214428 returns to 008D9F60 (jal_addr + 8), then j 001E9AE0 back to game.
+// j 001E9AE0 = 0x0807A6B8  (0x001E9AE0 >> 2 = 0x07A6B8)
+patch=1,EE,208D9F58,extended,0C08510A // jal z_un_00214428        (ra → 008D9F60)
+patch=1,EE,208D9F5C,extended,4614BDC0 // [delay slot] add.s f23,f23,f20  (displaced)
+// z_un_00214428 returns here:
+patch=1,EE,208D9F60,extended,0807A6B8 // j 001E9AE0               back to game
+patch=1,EE,208D9F64,extended,00000000 // nop
+// cold detour end: 008D9F68
+
+// ============================================================
+// COLD INT LOOKUP  at 008D9F68
+//
+// Same structure as fire INT lookup.
+// Returns to 008D9E38 (float conversion in cold detour) with t0 = INT.
+// ============================================================
+patch=1,EE,208D9F68,extended,3C09006C // lui t1,0x006C
+patch=1,EE,208D9F6C,extended,352988C0 // ori t1,t1,0x88C0          t1 = 0x006C88C0 (entity base)
+patch=1,EE,208D9F70,extended,02894023 // subu t0,s4,t1              t0 = s4 − entity_base
+patch=1,EE,208D9F74,extended,34090BB8 // ori t1,zero,0x0BB8         entity stride (3000 bytes)
+patch=1,EE,208D9F78,extended,0109001B // divu t0,t1
+patch=1,EE,208D9F7C,extended,00004012 // mflo t0                    t0 = player_index
+patch=1,EE,208D9F80,extended,2D010004 // sltiu at,t0,4              at=1 if player_index < 4
+patch=1,EE,208D9F84,extended,10200009 // beq at,zero,+9→008D9FAC   invalid → fallback
+patch=1,EE,208D9F88,extended,3C09004E // [delay] lui t1,0x004E
+patch=1,EE,208D9F8C,extended,34094C30 // ori t1,zero,0x4C30         INT per-player stride
+patch=1,EE,208D9F90,extended,01090019 // multu t0,t1                player_index × INT_stride
+patch=1,EE,208D9F94,extended,00004012 // mflo t0                    t0 = byte offset
+patch=1,EE,208D9F98,extended,3C09004E // lui t1,0x004E
+patch=1,EE,208D9F9C,extended,25298B84 // addiu t1,t1,0x8B84         t1 = 0x004D8B84 (P1 INT base)
+patch=1,EE,208D9FA0,extended,01094021 // addu t0,t0,t1              t0 = this player's INT address
+patch=1,EE,208D9FA4,extended,8D080000 // lw t0,0(t0)               t0 = player INT
+patch=1,EE,208D9FA8,extended,15000003 // bne t0,zero,+3→008D9FB8   non-zero → use it
+patch=1,EE,208D9FAC,extended,3C09004E // [delay / fallback entry] lui t1,0x004E
+patch=1,EE,208D9FB0,extended,25298B84 // addiu t1,t1,0x8B84         t1 = 0x004D8B84
+patch=1,EE,208D9FB4,extended,8D280000 // lw t0,0(t1)               t0 = P1 fallback INT
+patch=1,EE,208D9FB8,extended,0823678E // j 008D9E38                → float conversion   (return label)
+patch=1,EE,208D9FBC,extended,00000000 // nop
+// cold lookup end: 008D9FC0
+
+// ============================================================
+// LIGHTNING WEAPONS DETOUR  at 008DA000
+//
+// Enchant register: f0 — identical to fire.  Save f0 to sp+0x0C, use
+// f0 as accumulator, scale saved f0, restore from stack, then call the
+// original JAL target (z_un_0017365c) with displaced add.s in its
+// delay slot, and j 001E9F58.
+// ============================================================
+
+// ---- PROLOGUE
+patch=1,EE,208DA000,extended,27BDFFE0 // addiu sp,sp,-0x20
+patch=1,EE,208DA004,extended,AFA10000 // sw at,0x00(sp)
+patch=1,EE,208DA008,extended,AFA80004 // sw t0,0x04(sp)
+patch=1,EE,208DA00C,extended,AFA90008 // sw t1,0x08(sp)
+patch=1,EE,208DA010,extended,E7A0000C // swc1 f0,0x0C(sp)         save lightning enchant
+patch=1,EE,208DA014,extended,E7A10010 // swc1 f1,0x10(sp)
+patch=1,EE,208DA018,extended,E7A20014 // swc1 f2,0x14(sp)
+patch=1,EE,208DA01C,extended,E7A30018 // swc1 f3,0x18(sp)
+
+// ---- GUARD: jump to multi-slot scanner at 008DA168
+// Sets t1 = 0x0018 (lightning element code bbbb); scanner checks bbbb+timer per slot.
+// Any matching buff slot → 008DA030 (scale path); no match → 008DA138 (skip path).
+patch=1,EE,208DA020,extended,00000000 // nop                        (t0 not pre-set; scanner loads directly)
+patch=1,EE,208DA024,extended,0823685A // j 008DA168                → multi-slot scanner
+patch=1,EE,208DA028,extended,34090018 // [delay] ori t1,zero,0x0018  t1 = lightning element code
+patch=1,EE,208DA02C,extended,00000000 // nop (unreachable)
+
+// ---- LOAD INT — j-trampoline to per-player lookup at 008DA270
+// lookup returns to 008DA038 (float conversion) with t0 = player INT
+patch=1,EE,208DA030,extended,0823689C // j 008DA270              → lightning INT lookup
+patch=1,EE,208DA034,extended,00000000 // nop
+
+// ---- CONVERT INT TO FLOAT  (f0 free — saved above)
+patch=1,EE,208DA038,extended,44880000 // mtc1 t0,f0
+patch=1,EE,208DA03C,extended,46800020 // cvt.s.w f0,f0
+patch=1,EE,208DA040,extended,46000086 // mov.s f2,f0               f2 = float(INT)
+patch=1,EE,208DA044,extended,44800000 // mtc1 zero,f0              f0 = 0.0 (accumulator)
+
+// ---- TIER 1: INT 20–100, +0.5%/pt
+patch=1,EE,208DA048,extended,3C0942C8 // lui t1,0x42C8             100.0f
+patch=1,EE,208DA04C,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208DA050,extended,460110E9 // min.s f3,f2,f1            f3 = min(INT,100)
+patch=1,EE,208DA054,extended,3C0941A0 // lui t1,0x41A0             20.0f
+patch=1,EE,208DA058,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208DA05C,extended,460118C1 // sub.s f3,f3,f1            f3 = min(INT,100) − 20
+patch=1,EE,208DA060,extended,46030034 // c.lt.s f0,f3
+patch=1,EE,208DA064,extended,45000006 // bc1f +6 → 008DA080        skip if INT ≤ 20
+patch=1,EE,208DA068,extended,00000000 // nop
+patch=1,EE,208DA06C,extended,3C093BA3 // lui t1,0x3BA3             0.005f hi
+patch=1,EE,208DA070,extended,3529D70A // ori t1,t1,0xD70A          0.005f
+patch=1,EE,208DA074,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208DA078,extended,460118C2 // mul.s f3,f3,f1            pts * 0.005
+patch=1,EE,208DA07C,extended,46030000 // add.s f0,f0,f3            accumulate
+// 008DA080: skip_t1
+
+// ---- TIER 2: INT 100–200, +0.4%/pt
+patch=1,EE,208DA080,extended,3C094348 // lui t1,0x4348             200.0f
+patch=1,EE,208DA084,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208DA088,extended,460110E9 // min.s f3,f2,f1            f3 = min(INT,200)
+patch=1,EE,208DA08C,extended,3C0942C8 // lui t1,0x42C8             100.0f
+patch=1,EE,208DA090,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208DA094,extended,460118C1 // sub.s f3,f3,f1            f3 = min(INT,200) − 100
+patch=1,EE,208DA098,extended,46030034 // c.lt.s f0,f3
+patch=1,EE,208DA09C,extended,45000006 // bc1f +6 → 008DA0B8        skip if INT ≤ 100
+patch=1,EE,208DA0A0,extended,00000000 // nop
+patch=1,EE,208DA0A4,extended,3C093B83 // lui t1,0x3B83             0.004f hi
+patch=1,EE,208DA0A8,extended,3529126F // ori t1,t1,0x126F          0.004f
+patch=1,EE,208DA0AC,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208DA0B0,extended,460118C2 // mul.s f3,f3,f1            pts * 0.004
+patch=1,EE,208DA0B4,extended,46030000 // add.s f0,f0,f3            accumulate
+// 008DA0B8: skip_t2
+
+// ---- TIER 3: INT 200–300, +0.3%/pt
+patch=1,EE,208DA0B8,extended,3C094396 // lui t1,0x4396             300.0f
+patch=1,EE,208DA0BC,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208DA0C0,extended,460110E9 // min.s f3,f2,f1            f3 = min(INT,300)
+patch=1,EE,208DA0C4,extended,3C094348 // lui t1,0x4348             200.0f
+patch=1,EE,208DA0C8,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208DA0CC,extended,460118C1 // sub.s f3,f3,f1            f3 = min(INT,300) − 200
+patch=1,EE,208DA0D0,extended,46030034 // c.lt.s f0,f3
+patch=1,EE,208DA0D4,extended,45000006 // bc1f +6 → 008DA0F0        skip if INT ≤ 200
+patch=1,EE,208DA0D8,extended,00000000 // nop
+patch=1,EE,208DA0DC,extended,3C093B44 // lui t1,0x3B44             0.003f hi
+patch=1,EE,208DA0E0,extended,35299BA6 // ori t1,t1,0x9BA6          0.003f
+patch=1,EE,208DA0E4,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208DA0E8,extended,460118C2 // mul.s f3,f3,f1            pts * 0.003
+patch=1,EE,208DA0EC,extended,46030000 // add.s f0,f0,f3            accumulate
+// 008DA0F0: skip_t3
+
+// ---- TIER 4: INT 300+, +0.2%/pt
+patch=1,EE,208DA0F0,extended,460010C6 // mov.s f3,f2               f3 = float(INT)
+patch=1,EE,208DA0F4,extended,3C094396 // lui t1,0x4396             300.0f
+patch=1,EE,208DA0F8,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208DA0FC,extended,460118C1 // sub.s f3,f3,f1            f3 = INT − 300
+patch=1,EE,208DA100,extended,46030034 // c.lt.s f0,f3
+patch=1,EE,208DA104,extended,45000006 // bc1f +6 → 008DA120        skip if INT ≤ 300
+patch=1,EE,208DA108,extended,00000000 // nop
+patch=1,EE,208DA10C,extended,3C093B03 // lui t1,0x3B03             0.002f hi
+patch=1,EE,208DA110,extended,3529126F // ori t1,t1,0x126F          0.002f
+patch=1,EE,208DA114,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208DA118,extended,460118C2 // mul.s f3,f3,f1            pts * 0.002
+patch=1,EE,208DA11C,extended,46030000 // add.s f0,f0,f3            accumulate
+// 008DA120: skip_t4
+
+// ---- APPLY: scale f0  (identical to fire)
+// mul.s f0,f3,f0 encodes as 46001802 (ft=f0=0, fs=f3=3, fd=f0=0, func=2)
+patch=1,EE,208DA120,extended,3C093F80 // lui t1,0x3F80             1.0f
+patch=1,EE,208DA124,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208DA128,extended,46000800 // add.s f0,f1,f0            f0 = 1.0 + bonus
+patch=1,EE,208DA12C,extended,C7A3000C // lwc1 f3,0x0C(sp)          f3 = original enchant
+patch=1,EE,208DA130,extended,46001802 // mul.s f0,f3,f0            f0 = enchant * (1.0+bonus)
+patch=1,EE,208DA134,extended,E7A0000C // swc1 f0,0x0C(sp)          store scaled enchant back
+// 008DA138: skip_scale
+
+// ---- RESTORE
+patch=1,EE,208DA138,extended,8FA10000 // lw at,0x00(sp)
+patch=1,EE,208DA13C,extended,8FA80004 // lw t0,0x04(sp)
+patch=1,EE,208DA140,extended,8FA90008 // lw t1,0x08(sp)
+patch=1,EE,208DA144,extended,C7A0000C // lwc1 f0,0x0C(sp)          f0 = scaled or original
+patch=1,EE,208DA148,extended,C7A10010 // lwc1 f1,0x10(sp)
+patch=1,EE,208DA14C,extended,C7A20014 // lwc1 f2,0x14(sp)
+patch=1,EE,208DA150,extended,C7A30018 // lwc1 f3,0x18(sp)
+patch=1,EE,208DA154,extended,27BD0020 // addiu sp,sp,0x20
+
+// ---- RETURN: displaced add.s in delay slot of jal; call original JAL target
+// jal z_un_0017365c = 0x0C05CD97  (0x0017365C >> 2 = 0x0005CD97)
+// z_un_0017365c returns to 008DA160, then j 001E9F58 back to game.
+// j 001E9F58 = 0x0807A7D6  (0x001E9F58 >> 2 = 0x07A7D6)
+patch=1,EE,208DA158,extended,0C05CD97 // jal z_un_0017365c         (ra → 008DA160)
+patch=1,EE,208DA15C,extended,4600BDC0 // [delay slot] add.s f23,f23,f0  (displaced)
+// z_un_0017365c returns here:
+patch=1,EE,208DA160,extended,0807A7D6 // j 001E9F58                back to game
+patch=1,EE,208DA164,extended,00000000 // nop
+
+// ============================================================
+// LIGHTNING SCANNER  at 008DA168
+//
+// Entry: t1 = 0x0018 (lightning element code, loaded by guard in j delay slot)
+// Per slot: read lo16 of word0 (bbbb) from s1+fixed_offset;
+//           if bbbb == t1, read hi16 of word1 (cccc = timer);
+//           if timer != 0 → spell buff → scale path.
+// Any matching buff → j 008DA030 (scale path)
+// No match after all 4 slots → bne/beq → j 008DA138 (skip path)
+//
+// Slot word0 bbbb offsets: s1+0x20, s1+0x28, s1+0x30, s1+0x38
+// Slot word1 cccc offsets: s1+0x26, s1+0x2E, s1+0x36, s1+0x3E
+//
+// Branch offset arithmetic (all offsets verified):
+//   bne t0,t1,+3 → slot1 (008DA17C): offset = (17C−170)/4 = 3
+//   bne t0,zero → scale (008DA030) at 008DA174: offset = (030−178)/4 = −82 = 0xFFAE
+//   bne t0,t1,+3 → slot2 (008DA190): offset = (190−184)/4 = 3
+//   bne t0,zero → scale (008DA030) at 008DA188: offset = (030−18C)/4 = −87 = 0xFFA9
+//   bne t0,t1,+3 → slot3 (008DA1A4): offset = (1A4−198)/4 = 3
+//   bne t0,zero → scale (008DA030) at 008DA19C: offset = (030−1A0)/4 = −92 = 0xFFA4
+//   bne t0,t1 → skip (008DA138) at 008DA1A8: offset = (138−1AC)/4 = −29 = 0xFFE3
+//   beq t0,zero → skip (008DA138) at 008DA1B0: offset = (138−1B4)/4 = −31 = 0xFFE1
+// ============================================================
+patch=1,EE,208DA168,extended,96280020 // lhu t0,0x20(s1)           t0 = slot-0 bbbb (element code)
+patch=1,EE,208DA16C,extended,15090003 // bne t0,t1,+3              bbbb != 0x0018 → slot1
+patch=1,EE,208DA170,extended,96280026 // [delay] lhu t0,0x26(s1)   t0 = slot-0 cccc (timer)
+patch=1,EE,208DA174,extended,1500FFAE // bne t0,zero,008DA030      timer != 0 → buff → scale
+patch=1,EE,208DA178,extended,00000000 // nop
+// slot1:
+patch=1,EE,208DA17C,extended,96280028 // lhu t0,0x28(s1)           t0 = slot-1 bbbb
+patch=1,EE,208DA180,extended,15090003 // bne t0,t1,+3              bbbb != 0x0018 → slot2
+patch=1,EE,208DA184,extended,9628002E // [delay] lhu t0,0x2E(s1)   t0 = slot-1 cccc (timer)
+patch=1,EE,208DA188,extended,1500FFA9 // bne t0,zero,008DA030      timer != 0 → scale
+patch=1,EE,208DA18C,extended,00000000 // nop
+// slot2:
+patch=1,EE,208DA190,extended,96280030 // lhu t0,0x30(s1)           t0 = slot-2 bbbb
+patch=1,EE,208DA194,extended,15090003 // bne t0,t1,+3              bbbb != 0x0018 → slot3
+patch=1,EE,208DA198,extended,96280036 // [delay] lhu t0,0x36(s1)   t0 = slot-2 cccc (timer)
+patch=1,EE,208DA19C,extended,1500FFA4 // bne t0,zero,008DA030      timer != 0 → scale
+patch=1,EE,208DA1A0,extended,00000000 // nop
+// slot3:
+patch=1,EE,208DA1A4,extended,96280038 // lhu t0,0x38(s1)           t0 = slot-3 bbbb
+patch=1,EE,208DA1A8,extended,1509FFE3 // bne t0,t1,008DA138        bbbb != 0x0018 → no match → skip
+patch=1,EE,208DA1AC,extended,9628003E // [delay] lhu t0,0x3E(s1)   t0 = slot-3 cccc (timer)
+patch=1,EE,208DA1B0,extended,1100FFE1 // beq t0,zero,008DA138      timer == 0 → gem → skip
+patch=1,EE,208DA1B4,extended,00000000 // nop
+patch=1,EE,208DA1B8,extended,0823680C // j 008DA030                timer != 0 → buff → scale
+patch=1,EE,208DA1BC,extended,00000000 // nop
+// lightning scanner end: 008DA1C0
+
+// ============================================================
+// FIRE SCANNER  at 008DA1C0
+//
+// Entry: t1 = 0x0015 (fire element code, loaded by guard in j delay slot)
+// Same two-field check as lightning: bbbb == 0x0015 AND cccc (timer) != 0.
+// Any matching buff → j 008D9C30 (scale path)
+// No match → bne → 008D9D38 (skip path)
+//
+// Slot word0 bbbb offsets: s1+0x20, s1+0x28, s1+0x30, s1+0x38
+// Slot word1 cccc offsets: s1+0x26, s1+0x2E, s1+0x36, s1+0x3E
+//
+// Branch offset arithmetic (all offsets verified):
+//   bne t0,t1,+3 → slot1 (008DA1D4): offset = (1D4−1C8)/4 = 3
+//   bne t0,zero → scale (008D9C30) at 008DA1CC: offset = (9C30−1D0)/4 = −0x5A0/4 = −360 = 0xFE98
+//   bne t0,t1,+3 → slot2 (008DA1E8): offset = (1E8−1DC)/4 = 3
+//   bne t0,zero → scale (008D9C30) at 008DA1E0: offset = (9C30−1E4)/4 = −0x5B4/4 = −365 = 0xFE93
+//   bne t0,t1,+3 → slot3 (008DA1FC): offset = (1FC−1F0)/4 = 3
+//   bne t0,zero → scale (008D9C30) at 008DA1F4: offset = (9C30−1F8)/4 = −0x5C8/4 = −370 = 0xFE8E
+//   bne t0,t1 → skip (008D9D38) at 008DA200: offset = (9D38−204)/4 = −0x4CC/4 = −307 = 0xFECD
+//   beq t0,zero → skip (008D9D38) at 008DA208: offset = (9D38−20C)/4 = −0x4D4/4 = −309 = 0xFECB
+// ============================================================
+patch=1,EE,208DA1C0,extended,96280020 // lhu t0,0x20(s1)           t0 = slot-0 bbbb (element code)
+patch=1,EE,208DA1C4,extended,15090003 // bne t0,t1,+3              bbbb != 0x0015 → slot1
+patch=1,EE,208DA1C8,extended,96280026 // [delay] lhu t0,0x26(s1)   t0 = slot-0 cccc (timer)
+patch=1,EE,208DA1CC,extended,1500FE98 // bne t0,zero,008D9C30      timer != 0 → buff → scale
+patch=1,EE,208DA1D0,extended,00000000 // nop
+// slot1:
+patch=1,EE,208DA1D4,extended,96280028 // lhu t0,0x28(s1)           t0 = slot-1 bbbb
+patch=1,EE,208DA1D8,extended,15090003 // bne t0,t1,+3              bbbb != 0x0015 → slot2
+patch=1,EE,208DA1DC,extended,9628002E // [delay] lhu t0,0x2E(s1)   t0 = slot-1 cccc (timer)
+patch=1,EE,208DA1E0,extended,1500FE93 // bne t0,zero,008D9C30      timer != 0 → scale
+patch=1,EE,208DA1E4,extended,00000000 // nop
+// slot2:
+patch=1,EE,208DA1E8,extended,96280030 // lhu t0,0x30(s1)           t0 = slot-2 bbbb
+patch=1,EE,208DA1EC,extended,15090003 // bne t0,t1,+3              bbbb != 0x0015 → slot3
+patch=1,EE,208DA1F0,extended,96280036 // [delay] lhu t0,0x36(s1)   t0 = slot-2 cccc (timer)
+patch=1,EE,208DA1F4,extended,1500FE8E // bne t0,zero,008D9C30      timer != 0 → scale
+patch=1,EE,208DA1F8,extended,00000000 // nop
+// slot3:
+patch=1,EE,208DA1FC,extended,96280038 // lhu t0,0x38(s1)           t0 = slot-3 bbbb
+patch=1,EE,208DA200,extended,1509FECD // bne t0,t1,008D9D38        bbbb != 0x0015 → no match → skip
+patch=1,EE,208DA204,extended,9628003E // [delay] lhu t0,0x3E(s1)   t0 = slot-3 cccc (timer)
+patch=1,EE,208DA208,extended,1100FECB // beq t0,zero,008D9D38      timer == 0 → gem → skip
+patch=1,EE,208DA20C,extended,00000000 // nop
+patch=1,EE,208DA210,extended,0823670C // j 008D9C30                timer != 0 → buff → scale
+patch=1,EE,208DA214,extended,00000000 // nop
+// fire scanner end: 008DA218
+
+// ============================================================
+// COLD SCANNER  at 008DA218
+//
+// Entry: t1 = 0x0016 (cold element code, loaded by guard in j delay slot)
+// Same two-field check: bbbb == 0x0016 AND cccc (timer) != 0.
+// Any matching buff → j 008D9E30 (scale path)
+// No match → bne → 008D9F38 (skip path)
+//
+// Branch offset arithmetic (all offsets verified):
+//   bne t0,t1,+3 → slot1 (008DA22C): offset = (22C−220)/4 = 3
+//   bne t0,zero → scale (008D9E30) at 008DA224: offset = (9E30−228)/4 = −0x3F8/4 = −254 = 0xFF02
+//   bne t0,t1,+3 → slot2 (008DA240): offset = (240−234)/4 = 3
+//   bne t0,zero → scale (008D9E30) at 008DA238: offset = (9E30−23C)/4 = −0x40C/4 = −259 = 0xFEFD
+//   bne t0,t1,+3 → slot3 (008DA254): offset = (254−248)/4 = 3
+//   bne t0,zero → scale (008D9E30) at 008DA24C: offset = (9E30−250)/4 = −0x420/4 = −264 = 0xFEF8
+//   bne t0,t1 → skip (008D9F38) at 008DA258: offset = (9F38−25C)/4 = −0x324/4 = −201 = 0xFF37
+//   beq t0,zero → skip (008D9F38) at 008DA260: offset = (9F38−264)/4 = −0x32C/4 = −203 = 0xFF35
+// ============================================================
+patch=1,EE,208DA218,extended,96280020 // lhu t0,0x20(s1)           t0 = slot-0 bbbb (element code)
+patch=1,EE,208DA21C,extended,15090003 // bne t0,t1,+3              bbbb != 0x0016 → slot1
+patch=1,EE,208DA220,extended,96280026 // [delay] lhu t0,0x26(s1)   t0 = slot-0 cccc (timer)
+patch=1,EE,208DA224,extended,1500FF02 // bne t0,zero,008D9E30      timer != 0 → buff → scale
+patch=1,EE,208DA228,extended,00000000 // nop
+// slot1:
+patch=1,EE,208DA22C,extended,96280028 // lhu t0,0x28(s1)           t0 = slot-1 bbbb
+patch=1,EE,208DA230,extended,15090003 // bne t0,t1,+3              bbbb != 0x0016 → slot2
+patch=1,EE,208DA234,extended,9628002E // [delay] lhu t0,0x2E(s1)   t0 = slot-1 cccc (timer)
+patch=1,EE,208DA238,extended,1500FEFD // bne t0,zero,008D9E30      timer != 0 → scale
+patch=1,EE,208DA23C,extended,00000000 // nop
+// slot2:
+patch=1,EE,208DA240,extended,96280030 // lhu t0,0x30(s1)           t0 = slot-2 bbbb
+patch=1,EE,208DA244,extended,15090003 // bne t0,t1,+3              bbbb != 0x0016 → slot3
+patch=1,EE,208DA248,extended,96280036 // [delay] lhu t0,0x36(s1)   t0 = slot-2 cccc (timer)
+patch=1,EE,208DA24C,extended,1500FEF8 // bne t0,zero,008D9E30      timer != 0 → scale
+patch=1,EE,208DA250,extended,00000000 // nop
+// slot3:
+patch=1,EE,208DA254,extended,96280038 // lhu t0,0x38(s1)           t0 = slot-3 bbbb
+patch=1,EE,208DA258,extended,1509FF37 // bne t0,t1,008D9F38        bbbb != 0x0016 → no match → skip
+patch=1,EE,208DA25C,extended,9628003E // [delay] lhu t0,0x3E(s1)   t0 = slot-3 cccc (timer)
+patch=1,EE,208DA260,extended,1100FF35 // beq t0,zero,008D9F38      timer == 0 → gem → skip
+patch=1,EE,208DA264,extended,00000000 // nop
+patch=1,EE,208DA268,extended,0823678C // j 008D9E30                timer != 0 → buff → scale
+patch=1,EE,208DA26C,extended,00000000 // nop
+// cold scanner end: 008DA270
+
+// ============================================================
+// LIGHTNING INT LOOKUP  at 008DA270
+//
+// Same structure as fire INT lookup.
+// Returns to 008DA038 (float conversion in lightning detour) with t0 = INT.
+// ============================================================
+patch=1,EE,208DA270,extended,3C09006C // lui t1,0x006C
+patch=1,EE,208DA274,extended,352988C0 // ori t1,t1,0x88C0          t1 = 0x006C88C0 (entity base)
+patch=1,EE,208DA278,extended,02894023 // subu t0,s4,t1              t0 = s4 − entity_base
+patch=1,EE,208DA27C,extended,34090BB8 // ori t1,zero,0x0BB8         entity stride (3000 bytes)
+patch=1,EE,208DA280,extended,0109001B // divu t0,t1
+patch=1,EE,208DA284,extended,00004012 // mflo t0                    t0 = player_index
+patch=1,EE,208DA288,extended,2D010004 // sltiu at,t0,4              at=1 if player_index < 4
+patch=1,EE,208DA28C,extended,10200009 // beq at,zero,+9→008DA2B4   invalid → fallback
+patch=1,EE,208DA290,extended,3C09004E // [delay] lui t1,0x004E
+patch=1,EE,208DA294,extended,34094C30 // ori t1,zero,0x4C30         INT per-player stride
+patch=1,EE,208DA298,extended,01090019 // multu t0,t1                player_index × INT_stride
+patch=1,EE,208DA29C,extended,00004012 // mflo t0                    t0 = byte offset
+patch=1,EE,208DA2A0,extended,3C09004E // lui t1,0x004E
+patch=1,EE,208DA2A4,extended,25298B84 // addiu t1,t1,0x8B84         t1 = 0x004D8B84 (P1 INT base)
+patch=1,EE,208DA2A8,extended,01094021 // addu t0,t0,t1              t0 = this player's INT address
+patch=1,EE,208DA2AC,extended,8D080000 // lw t0,0(t0)               t0 = player INT
+patch=1,EE,208DA2B0,extended,15000003 // bne t0,zero,+3→008DA2C0   non-zero → use it
+patch=1,EE,208DA2B4,extended,3C09004E // [delay / fallback entry] lui t1,0x004E
+patch=1,EE,208DA2B8,extended,25298B84 // addiu t1,t1,0x8B84         t1 = 0x004D8B84
+patch=1,EE,208DA2BC,extended,8D280000 // lw t0,0(t1)               t0 = P1 fallback INT
+patch=1,EE,208DA2C0,extended,0823680E // j 008DA038                → float conversion   (return label)
+patch=1,EE,208DA2C4,extended,00000000 // nop
+// lightning lookup end: 008DA2C8
+
+// ============================================================
+// SECTION 2: DISEASE BLADE / POISON WEAPONS FIX
+// ============================================================
+[Disease Blade/Poison Weapons Fix]
+author=mysaltyspace created with Claude code
+description=Fixes Disease Blade (Shadow Knight) and Poison Weapon (Shaman). (1) On-hit fix: NOP at 001E82A0 + hook at 001E9818 adds damage computation for disease/poison element codes using the same LCG RNG and resistance formula as Fire/Cold/Lightning. (2) Ally buff timer fix: removes mod-30 re-application throttle and sets ally cccc to 60 ticks (~1s), eliminating ally buff flicker while standing in range. Can be enabled without Weapon Enchant INT Scaling.
+
+// ============================================================
+// HOW THIS WORKS
+// ============================================================
+// z_un_001e8230 (universal on-hit elemental handler) has two problems for
+// disease (0x0026) and poison (0x0017):
+//
+// PROBLEM 1 — early-exit gate at 001E82A0:
+//   001E8294: 8E83000C  lw  v1,0xC(s4)
+//   001E8298: 3C040002  lui a0,0x0002          // mask = 0x00020000 (bit 17)
+//   001E829C: 00641824  and v1,v1,a0
+//   001E82A0: 14600A73  bne v1,zero,001EAC70   // bit17 SET → exit early, no damage
+//   Debugger confirmed: disease hit v1=0x6C426573... (bit17 SET) → exits; socket gem v1=0 → continues.
+//   FIX 1: NOP the bne.  Delay slot (daddu v0,zero,zero) executes harmlessly.
+//
+// PROBLEM 2 — no disease/poison handler in the second half of z_un_001e8230:
+//   After the NOP, disease/poison continue to 001E8A14 (bit17 SET → don't exit again)
+//   → 001E8E64: beq s6,zero,001E9770 (s6=0, no scanner matched) → 001E9770
+//   → 001E9770–001E97A8: 0x1B scanner (disease not found) → falls to 001E9818
+//   → 001E9818: addiu a2,zero,0x15 (start of fire scanner — disease ignored here too)
+//   → fire scanner finds nothing → 001E9998 → epilogue → zero elemental damage.
+//
+//   There is no handler for element codes 0x0026 (disease) or 0x0017 (poison).
+//
+//   FIX 2: Hook at 001E9818 (disease ALWAYS reaches this instruction).
+//   Detour at 008DA2C8 scans all 4 enchant slots for disease OR poison:
+//     - check bbbb (lo16 of word0) for 0x0026 or 0x0017
+//     - if found, check cccc (hi16 of word1) = timer; 0 = gem → skip
+//     - if timer > 0 (spell buff): compute elemental damage with LCG RNG + resistance
+//       formula, add result to f23 (same as Fire/Cold/Lightning handlers)
+//     - return to 001E9820 (fire scanner body which re-initializes its own vars)
+//   Fire scanner then runs but finds no 0x0015 entry → exits with no additional damage.
+//   The displaced instructions (addiu a2,zero,0x15 / daddu a0,zero,zero) are replicated
+//   at the top of the detour so the fire scanner behaves identically on return.
+//
+// SLOT LAYOUT (per CLAUDE.md):
+//   word0 at s1+0x20/0x28/0x30/0x38 (stride 8): lo16=bbbb=element code, hi16=aaaa=min_damage
+//   word1 at s1+0x24/0x2C/0x34/0x3C:            hi16=cccc=timer (>0 buff, 0 gem), lo16=dddd=max_damage
+//   lhu t8,0x0(v1)  → bbbb  (element code);  check 0x0026 then 0x0017
+//   lhu t8,0x6(v1)  → cccc  (timer);         0 → skip, nonzero → buff
+//   lhu t0,0x2(v1)  → aaaa  (min_damage)
+//   lhu a1,0x4(v1)  → dddd  (max_damage)
+//
+// LCG RNG:  state at 0x00404464; new = old*0x0019660D + 0x3C6EF35F; damage_rng = new>>16
+// RESISTANCE: f01 = *(s2+0x5C); net_damage = damage*(1.0-f01); add.s f23,f23,f00
+// ============================================================
+
+// ---- FIX 1: NOP the early-exit branch (gate 1 — before second half of z_un_001e8230)
+patch=1,EE,201E82A0,extended,00000000 // nop  (was: bne v1,zero,001EAC70 = 14600A73)
+
+// ---- FIX 2: Hook at 001E9818 (replaces addiu a2,zero,0x15 with j to detour)
+patch=1,EE,201E9818,extended,082368B2 // j 008DA2C8  (was: addiu a2,zero,0x15 = 24060015)
+patch=1,EE,201E981C,extended,00000000 // nop         (was: daddu a0,zero,zero  = 0000202D)
+
+// ============================================================
+// DISEASE/POISON DETOUR  at 008DA2C8  (44 instructions, 176 bytes → ends 008DA378)
+//
+// Entry state: s1=weapon struct ptr, s2=enemy entity ptr, f23=damage accum
+// Registers used: a2,a0,v1,t6,t7,t8,t9 (scanner); at,t0,t2,t3,a1 (RNG+damage); f00,f01
+// No stack frame needed — temp registers only, all caller-saved.
+//
+// Return: j 001E9820 from both paths (not_found and exit).
+//   001E9820 = addiu v1,s1,0x20  (first instruction of fire scanner body).
+//   a2 is already 0x15 (replicated below) so fire scanner is consistent.
+// ============================================================
+
+// ---- REPLICATE displaced instructions (were at 001E9818/001E981C)
+patch=1,EE,208DA2C8,extended,24060015 // addiu a2,zero,0x15       (fire element code for fire scanner)
+patch=1,EE,208DA2CC,extended,0000202D // daddu a0,zero,zero        (clears a0 as original did)
+
+// ---- SCANNER SETUP
+patch=1,EE,208DA2D0,extended,24190004 // addiu t9,zero,4           slot counter (4 slots)
+patch=1,EE,208DA2D4,extended,26230020 // addiu v1,s1,0x20          v1 = &slot[0]
+patch=1,EE,208DA2D8,extended,240F0026 // addiu t7,zero,0x26        t7 = disease element code
+
+// ---- SLOT SCAN LOOP (008DA2DC)
+// For each slot: check bbbb==disease OR bbbb==poison; advance pointer; repeat.
+// bnel (branch likely): delay slot SQUASHED if branch NOT taken (t9==0 → exit loop cleanly).
+patch=1,EE,208DA2DC,extended,94780000 // lhu t8,0x0(v1)            t8 = bbbb (element code)
+patch=1,EE,208DA2E0,extended,130F0007 // beq t8,t7,+7 → 008DA300  disease? → found
+patch=1,EE,208DA2E4,extended,240E0017 // [delay] addiu t6,zero,0x17  t6 = poison element code
+patch=1,EE,208DA2E8,extended,130E0005 // beq t8,t6,+5 → 008DA300  poison? → found
+patch=1,EE,208DA2EC,extended,2739FFFF // [delay] addiu t9,t9,-1    decrement slot counter
+patch=1,EE,208DA2F0,extended,5720FFFA // bnel t9,zero,-6 → 008DA2DC  more slots? loop (delay squashed if done)
+patch=1,EE,208DA2F4,extended,24630008 // [delay] addiu v1,v1,0x8   advance to next slot
+
+// ---- NOT FOUND: return to fire scanner (which will also find nothing for disease/poison)
+patch=1,EE,208DA2F8,extended,0807A608 // j 001E9820                no disease/poison buff → skip
+patch=1,EE,208DA2FC,extended,00000000 // nop
+
+// ---- FOUND (008DA300): slot matched — check timer to distinguish buff from gem
+patch=1,EE,208DA300,extended,94780006 // lhu t8,0x6(v1)            t8 = cccc (timer; hi16 of word1)
+patch=1,EE,208DA304,extended,1300001B // beq t8,zero,+27 → 008DA374  timer==0 → gem → skip exit
+patch=1,EE,208DA308,extended,00000000 // nop
+
+// ---- LOAD MIN / MAX DAMAGE
+patch=1,EE,208DA30C,extended,94680002 // lhu t0,0x2(v1)            t0 = aaaa (min_damage)
+patch=1,EE,208DA310,extended,94650004 // lhu a1,0x4(v1)            a1 = dddd (max_damage)
+
+// ---- LCG RNG STEP: new_state = old_state * 0x0019660D + 0x3C6EF35F
+patch=1,EE,208DA314,extended,3C010040 // lui at,0x0040             at = 0x00400000
+patch=1,EE,208DA318,extended,24214464 // addiu at,at,0x4464        at = 0x00404464 (RNG state addr)
+patch=1,EE,208DA31C,extended,8C2A0000 // lw t2,0x0(at)             t2 = old RNG state
+patch=1,EE,208DA320,extended,3C0B0019 // lui t3,0x0019
+patch=1,EE,208DA324,extended,356B660D // ori t3,t3,0x660D           t3 = 0x0019660D (multiplier)
+patch=1,EE,208DA328,extended,014B0018 // mult t2,t3                 HI:LO = old_state * mult
+patch=1,EE,208DA32C,extended,00005012 // mflo t2                    t2 = low 32 bits of product
+patch=1,EE,208DA330,extended,3C0B3C6E // lui t3,0x3C6E
+patch=1,EE,208DA334,extended,356BF35F // ori t3,t3,0xF35F           t3 = 0x3C6EF35F (addend)
+patch=1,EE,208DA338,extended,016A5021 // addu t2,t3,t2              t2 = new RNG state
+patch=1,EE,208DA33C,extended,AC2A0000 // sw t2,0x0(at)              store new RNG state
+patch=1,EE,208DA340,extended,000A5402 // srl t2,t2,0x10             t2 = new_state >> 16 (RNG sample)
+
+// ---- COMPUTE DAMAGE: min + (rng_sample mod range)
+patch=1,EE,208DA344,extended,00A82823 // subu a1,a1,t0              a1 = max - min
+patch=1,EE,208DA348,extended,24A50001 // addiu a1,a1,0x1            a1 = range (max-min+1)
+patch=1,EE,208DA34C,extended,0145001A // div t2,a1                  LO = quotient, HI = remainder
+patch=1,EE,208DA350,extended,00005010 // mfhi t2                    t2 = rng_sample mod range
+patch=1,EE,208DA354,extended,010A5021 // addu t2,t0,t2              t2 = min + remainder
+
+// ---- APPLY RESISTANCE: net = damage * (1 - resistance); then jump to INT scaling
+patch=1,EE,208DA358,extended,448A0000 // mtc1 t2,f00                f00 = damage (int)
+patch=1,EE,208DA35C,extended,46800020 // cvt.s.w f00,f00            f00 = float(damage)
+patch=1,EE,208DA360,extended,C641005C // lwc1 f01,0x5C(s2)          f01 = resistance factor
+patch=1,EE,208DA364,extended,46010042 // mul.s f01,f00,f01          f01 = damage * resistance
+patch=1,EE,208DA368,extended,46010001 // sub.s f00,f00,f01          f00 = net damage (damage*(1-resist))
+patch=1,EE,208DA36C,extended,082368DF // j 008DA37C                 → INT scaling block
+patch=1,EE,208DA370,extended,00000000 // nop                        [delay slot of above j]
+
+// ---- GEM/SKIP EXIT (008DA374): timer==0 → socket gem → return without damage or scaling
+// f00 is NOT zeroed on this path; value at hook entry is preserved (same as pre-patch behaviour).
+patch=1,EE,208DA374,extended,0807A608 // j 001E9820
+patch=1,EE,208DA378,extended,00000000 // nop
+
+// ============================================================
+// DISEASE/POISON INT SCALING BLOCK  at 008DA37C  (89 instructions, 356 bytes → ends 008DA4E0)
+//
+// Entry: f00 = net elemental damage (resistance already applied); s4 = player entity ptr
+// Does per-player INT lookup (same stride formula as Fire/Cold/Lightning lookup routines),
+// computes tiered bonus (identical to Fire detour register layout and constants),
+// multiplies net damage by (1.0+bonus), adds to f23, then ZEROS f00 before returning.
+//
+// WHY ZERO f00: the Fire INT scaling detour at 001E9928 always runs after us (fire scanner
+// finds nothing for a disease/poison weapon but still hits the hook). Its skip-path return
+// code does:  add.s f23,f23,f00  (displaced bne delay slot). If f00 != 0 at that point it
+// would double-add disease/poison damage. Zeroing f00 makes that add.s a no-op.
+//
+// Stack frame: -8 bytes; f00 (net_damage) saved at sp+0x00.
+//
+// Register layout (same as Fire detour tiers):
+//   f0 = bonus accumulator (0.0 init; multiplier = 1.0+bonus at apply step)
+//   f1 = constant temp (reloaded each tier use)
+//   f2 = float(INT)
+//   f3 = tier scratch / net_damage (loaded from stack at apply step)
+// f1,f2,f3 clobbered but restored by Fire INT detour's own stack frame on its return path.
+// ============================================================
+
+// ---- STACK SETUP: save net_damage so f0 is free for bonus accumulator
+patch=1,EE,208DA37C,extended,27BDFFF8 // addiu sp,sp,-8
+patch=1,EE,208DA380,extended,E7A00000 // swc1 f00,0x00(sp)          save net_damage
+
+// ---- PER-PLAYER INT LOOKUP (inline — same logic as routines at 008D9D70/008D9F68/008DA270)
+patch=1,EE,208DA384,extended,3C09006C // lui t1,0x006C
+patch=1,EE,208DA388,extended,352988C0 // ori t1,t1,0x88C0            t1 = 0x006C88C0 (entity base)
+patch=1,EE,208DA38C,extended,02894023 // subu t0,s4,t1               t0 = s4 − entity_base
+patch=1,EE,208DA390,extended,34090BB8 // ori t1,zero,0x0BB8          entity stride (3000 bytes)
+patch=1,EE,208DA394,extended,0109001B // divu t0,t1
+patch=1,EE,208DA398,extended,00004012 // mflo t0                     t0 = player_index
+patch=1,EE,208DA39C,extended,2D010004 // sltiu at,t0,4               at=1 if player_index < 4
+patch=1,EE,208DA3A0,extended,10200009 // beq at,zero,+9 → 008DA3C8   invalid → fallback
+patch=1,EE,208DA3A4,extended,3C09004E // [delay] lui t1,0x004E
+patch=1,EE,208DA3A8,extended,34094C30 // ori t1,zero,0x4C30          INT per-player stride
+patch=1,EE,208DA3AC,extended,01090019 // multu t0,t1                 player_index × stride
+patch=1,EE,208DA3B0,extended,00004012 // mflo t0                     t0 = byte offset
+patch=1,EE,208DA3B4,extended,3C09004E // lui t1,0x004E
+patch=1,EE,208DA3B8,extended,25298B84 // addiu t1,t1,0x8B84          t1 = 0x004D8B84 (P1 INT base)
+patch=1,EE,208DA3BC,extended,01094021 // addu t0,t0,t1               t0 = this player's INT addr
+patch=1,EE,208DA3C0,extended,8D080000 // lw t0,0(t0)                 t0 = player INT
+patch=1,EE,208DA3C4,extended,15000003 // bne t0,zero,+3 → 008DA3D4   non-zero → use it
+patch=1,EE,208DA3C8,extended,3C09004E // [delay / fallback entry] lui t1,0x004E
+patch=1,EE,208DA3CC,extended,25298B84 // addiu t1,t1,0x8B84
+patch=1,EE,208DA3D0,extended,8D280000 // lw t0,0(t1)                 t0 = P1 fallback INT
+// 008DA3D4: t0 = player INT
+
+// ---- CONVERT INT TO FLOAT; init bonus accumulator (same register layout as Fire detour)
+patch=1,EE,208DA3D4,extended,44881000 // mtc1 t0,f2                  f2 = INT (int)
+patch=1,EE,208DA3D8,extended,468010A0 // cvt.s.w f2,f2               f2 = float(INT)
+patch=1,EE,208DA3DC,extended,44800000 // mtc1 zero,f0                f0 = 0.0 (bonus accumulator)
+
+// ---- TIER 1: INT 20–100, +0.5%/pt  (identical encodings to Fire detour tiers)
+patch=1,EE,208DA3E0,extended,3C0942C8 // lui t1,0x42C8               100.0f
+patch=1,EE,208DA3E4,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208DA3E8,extended,460110E9 // min.s f3,f2,f1              f3 = min(INT,100)
+patch=1,EE,208DA3EC,extended,3C0941A0 // lui t1,0x41A0               20.0f
+patch=1,EE,208DA3F0,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208DA3F4,extended,460118C1 // sub.s f3,f3,f1              f3 = min(INT,100) − 20
+patch=1,EE,208DA3F8,extended,46030034 // c.lt.s f0,f3                FCC = (0.0 < f3) = (INT > 20)
+patch=1,EE,208DA3FC,extended,45000006 // bc1f +6 → 008DA418          skip if INT ≤ 20
+patch=1,EE,208DA400,extended,00000000 // nop
+patch=1,EE,208DA404,extended,3C093BA3 // lui t1,0x3BA3
+patch=1,EE,208DA408,extended,3529D70A // ori t1,t1,0xD70A            0.005f
+patch=1,EE,208DA40C,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208DA410,extended,460118C2 // mul.s f3,f3,f1              pts_in_t1 * 0.005
+patch=1,EE,208DA414,extended,46030000 // add.s f0,f0,f3              accumulate
+// 008DA418: skip_t1
+
+// ---- TIER 2: INT 100–200, +0.4%/pt
+patch=1,EE,208DA418,extended,3C094348 // lui t1,0x4348               200.0f
+patch=1,EE,208DA41C,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208DA420,extended,460110E9 // min.s f3,f2,f1              f3 = min(INT,200)
+patch=1,EE,208DA424,extended,3C0942C8 // lui t1,0x42C8               100.0f
+patch=1,EE,208DA428,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208DA42C,extended,460118C1 // sub.s f3,f3,f1              f3 = min(INT,200) − 100
+patch=1,EE,208DA430,extended,46030034 // c.lt.s f0,f3
+patch=1,EE,208DA434,extended,45000006 // bc1f +6 → 008DA450          skip if INT ≤ 100
+patch=1,EE,208DA438,extended,00000000 // nop
+patch=1,EE,208DA43C,extended,3C093B83 // lui t1,0x3B83
+patch=1,EE,208DA440,extended,3529126F // ori t1,t1,0x126F            0.004f
+patch=1,EE,208DA444,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208DA448,extended,460118C2 // mul.s f3,f3,f1              pts_in_t2 * 0.004
+patch=1,EE,208DA44C,extended,46030000 // add.s f0,f0,f3              accumulate
+// 008DA450: skip_t2
+
+// ---- TIER 3: INT 200–300, +0.3%/pt
+patch=1,EE,208DA450,extended,3C094396 // lui t1,0x4396               300.0f
+patch=1,EE,208DA454,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208DA458,extended,460110E9 // min.s f3,f2,f1              f3 = min(INT,300)
+patch=1,EE,208DA45C,extended,3C094348 // lui t1,0x4348               200.0f
+patch=1,EE,208DA460,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208DA464,extended,460118C1 // sub.s f3,f3,f1              f3 = min(INT,300) − 200
+patch=1,EE,208DA468,extended,46030034 // c.lt.s f0,f3
+patch=1,EE,208DA46C,extended,45000006 // bc1f +6 → 008DA488          skip if INT ≤ 200
+patch=1,EE,208DA470,extended,00000000 // nop
+patch=1,EE,208DA474,extended,3C093B44 // lui t1,0x3B44
+patch=1,EE,208DA478,extended,35299BA6 // ori t1,t1,0x9BA6            0.003f
+patch=1,EE,208DA47C,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208DA480,extended,460118C2 // mul.s f3,f3,f1              pts_in_t3 * 0.003
+patch=1,EE,208DA484,extended,46030000 // add.s f0,f0,f3              accumulate
+// 008DA488: skip_t3
+
+// ---- TIER 4: INT 300+, +0.2%/pt
+patch=1,EE,208DA488,extended,460010C6 // mov.s f3,f2                 f3 = float(INT)
+patch=1,EE,208DA48C,extended,3C094396 // lui t1,0x4396               300.0f
+patch=1,EE,208DA490,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208DA494,extended,460118C1 // sub.s f3,f3,f1              f3 = INT − 300
+patch=1,EE,208DA498,extended,46030034 // c.lt.s f0,f3
+patch=1,EE,208DA49C,extended,45000006 // bc1f +6 → 008DA4B8          skip if INT ≤ 300
+patch=1,EE,208DA4A0,extended,00000000 // nop
+patch=1,EE,208DA4A4,extended,3C093B03 // lui t1,0x3B03
+patch=1,EE,208DA4A8,extended,3529126F // ori t1,t1,0x126F            0.002f
+patch=1,EE,208DA4AC,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208DA4B0,extended,460118C2 // mul.s f3,f3,f1              pts_above_300 * 0.002
+patch=1,EE,208DA4B4,extended,46030000 // add.s f0,f0,f3              accumulate
+// 008DA4B8: skip_t4
+
+// ---- APPLY: build multiplier, scale net_damage, add to f23, zero f00
+patch=1,EE,208DA4B8,extended,3C093F80 // lui t1,0x3F80               1.0f
+patch=1,EE,208DA4BC,extended,44890800 // mtc1 t1,f1
+patch=1,EE,208DA4C0,extended,46000800 // add.s f0,f1,f0              f0 = 1.0 + bonus = multiplier
+patch=1,EE,208DA4C4,extended,C7A30000 // lwc1 f3,0x00(sp)            f3 = net_damage (from stack)
+patch=1,EE,208DA4C8,extended,46001802 // mul.s f0,f3,f0              f0 = net_damage × multiplier
+patch=1,EE,208DA4CC,extended,4600BDC0 // add.s f23,f23,f00           f23 += scaled disease/poison damage
+patch=1,EE,208DA4D0,extended,44800000 // mtc1 zero,f00               f0 = 0.0  ← prevents Fire INT detour
+patch=1,EE,208DA4D4,extended,27BD0008 // addiu sp,sp,8               restore stack
+patch=1,EE,208DA4D8,extended,0807A608 // j 001E9820
+patch=1,EE,208DA4DC,extended,00000000 // nop
+// INT scaling block end: 008DA4E0
+
+// ============================================================
+// ALLY BUFF TIMER FIX
+// ============================================================
+//
+// HOW THIS WORKS
+// A buff-application function (around 0x003165xx) runs periodically while
+// Poison Weapon is active and allies are in range. For each in-range ally it
+// writes the Poison buff to that ally's weapon enchant slot:
+//   sh t4,   0x00(a0)  → bbbb = 0x0017 (Poison element code)
+//   sh t3,   0x00(v1)  → aaaa = weapon stat value (min damage)
+//   sh t1,  0x22(v0)   → dddd = round(t3 × 1.2)   (max damage)
+//   sh t1,  0x24(v0)   → cccc = round(t3 × 1.2)   (TIMER ← root cause)
+//                          ↑ delay slot of beq at 0x00316818
+//
+// t1 is computed from weapon stats via:
+//   mtc1/cvt.s.w t3→f00 → mul.s f01,f00,0.2 → add.s f01,f00,f01 → cvt.w.s/mfc1 → t1
+//   i.e.  t1 = round(t3 × 1.2)
+// For a typical weapon this produces t1 ≈ 52. Because the re-application
+// cycle is longer than 52 frames, cccc expires between refreshes → ally buff
+// briefly disappears → visible flicker.
+//
+// t5 is set just above the write section:
+//   addiu t5,zero,0x1F   at 0x003167CC   (t5 = 31, used for caster's own slot)
+// t5 is never read between 003167CC and 0031681C (the write section only
+// uses t1, t3, t4, t0, a0, a1, a2, v0, v1 — confirmed by full scan).
+//
+// FIX — three instructions:
+//   (1) 00316578: addiu v0,zero,0x1E (0x2402001E) → addiu v0,zero,0x01 (0x24020001)
+//       Changes the mod-30 throttle to mod-1 (always 0) — function runs every frame,
+//       eliminating the 0.5s re-application gap after buff expiry.
+//   (2) 003167CC: addiu t5,zero,0x1F (0x240D001F) → addiu t5,zero,0x3C (0x240D003C)
+//       Loads t5=60 instead of 31. t5 is free to repurpose here (never read between
+//       003167CC and 0031681C — confirmed by full instruction scan).
+//   (3) 0031681C: sh t1,0x24(v0)    (0xA4490024) → sh t5,0x24(v0)    (0xA44D0024)
+//       Delay slot: writes t5=60 to ally cccc instead of the computed t1 (~52).
+//
+// The ally's buff now has a 60-tick (~1s) timer. With the throttle removed the
+// re-application function runs every frame → cccc never reaches 0 while ally
+// is in range. dddd (max damage, sh t1 at 00316814) is left unchanged.
+//
+// EXPIRY — both mechanisms continue to work without any extra patches:
+//   Out of range:  001BC560 (maintenance/decrement function) decrements cccc
+//                  each frame. When the ally is out of range the re-application
+//                  function stops writing, cccc counts down from its current
+//                  value to 0 over ≤60 frames (~1s), then 001BC708 clears the slot. ✓
+//   Spell ends:    Same — re-application stops → cccc decays → slot clears.   ✓
+//
+// Note: t5 is also used after 0x00316828 for the caster's own slot timer
+// (was 31, now 60). This means the caster's self-buff lingers ~1s after
+// the spell ends instead of ~0.5s — a minor cosmetic change, not a bug.
+// ============================================================
+
+// Patch 1: eliminate mod-30 re-application throttle
+//   The buff-application function normally skips its body unless (frame_counter % 30 == 0).
+//   Changing the divisor from 30 to 1 makes mod-1 = 0 always → runs every frame.
+//   Original: addiu v0,zero,0x1E   (00316578 = 0x2402001E)
+//   Fixed:    addiu v0,zero,0x01   (00316578 = 0x24020001)
+patch=1,EE,200316578,extended,24020001
+
+// Patch 2: raise t5 from 31 → 60 (t5 is the fixed timer written to ally cccc)
+//   60 frames = ~1s. Function now runs every frame → ally cccc never expires while in range. ✓
+//   Original: addiu t5,zero,0x1F   (003167CC = 0x240D001F)
+//   Fixed:    addiu t5,zero,0x3C   (003167CC = 0x240D003C)
+patch=1,EE,203167CC,extended,240D003C
+
+// Patch 3: delay slot of beq at 00316818 — write t5 (60) to ally cccc instead of t1 (~52)
+//   Original: sh t1,0x24(v0)       (0031681C = 0xA4490024)
+//   Fixed:    sh t5,0x24(v0)       (0031681C = 0xA44D0024)
+patch=1,EE,2031681C,extended,A44D0024
